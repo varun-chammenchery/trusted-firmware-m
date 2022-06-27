@@ -32,13 +32,12 @@ target_include_directories(${CC312_PAL_TARGET}
         include
         include/proj/cc3x
         hw/include
-    PUBLIC
         include/pal
         include/pal/no_os
 )
 
 target_include_directories(${CC312_CDMPU_TARGET}
-    PRIVATE
+    INTERFACE
         include/crypto_api
         include/crypto_api/cc3x
         include/cc_mng

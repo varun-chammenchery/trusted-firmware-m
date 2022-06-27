@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2020 Arm Limited. All rights reserved.
+ * Copyright (c) 2017-2021 Arm Limited. All rights reserved.
  * Copyright (c) 2019-2020, Cypress Semiconductor Corporation. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -30,8 +30,8 @@
  * 0x101c_0000 - 0x101f_ffff Reserved
  *  0x101c_0000 Internal Trusted Storage Area (16 KB)
  *  0x101c_4000 Protected Storage Area (24 KB)
- *  0x101c_a000 Unused area (23 KB)
- *  0x101c_fc00 NV counters area (1 KB)
+ *  0x101c_a000 Unused area (22 KB)
+ *  0x101c_f800 OTP / NV counters area (2 KB)
  *  0x101d_0000 Reserved (192 KB)
  * 0x101f_ffff End of Flash
  *
@@ -80,12 +80,13 @@
 /* Unused Area */
 #define FLASH_UNUSED_AREA_OFFSET        (FLASH_PS_AREA_OFFSET + \
                                          FLASH_PS_AREA_SIZE)
-#define FLASH_UNUSED_AREA_SIZE          (0x5c00)   /* 23 KB */
+#define FLASH_UNUSED_AREA_SIZE          (0x5800)   /* 22 KB */
 
-/* Non-volatile Counters Area */
-#define FLASH_NV_COUNTERS_AREA_OFFSET   (FLASH_UNUSED_AREA_OFFSET + \
-                                         FLASH_UNUSED_AREA_SIZE)
-#define FLASH_NV_COUNTERS_AREA_SIZE     (2 * FLASH_AREA_IMAGE_SECTOR_SIZE)
+/* OTP_definitions */
+#define FLASH_OTP_NV_COUNTERS_AREA_OFFSET (FLASH_UNUSED_AREA_OFFSET + \
+                                           FLASH_UNUSED_AREA_SIZE)
+#define FLASH_OTP_NV_COUNTERS_AREA_SIZE   (FLASH_AREA_IMAGE_SECTOR_SIZE * 4)
+#define FLASH_OTP_NV_COUNTERS_SECTOR_SIZE FLASH_AREA_IMAGE_SECTOR_SIZE
 
 #define FLASH_AREA_SYSTEM_RESERVED_SIZE (0x30000) /* 192 KB */
 
@@ -106,31 +107,33 @@
 #define FLASH_DATA_AREA_SIZE            (FLASH_ITS_AREA_SIZE + \
                                          FLASH_PS_AREA_SIZE + \
                                          FLASH_UNUSED_AREA_SIZE + \
-                                         FLASH_NV_COUNTERS_AREA_SIZE + \
+                                         FLASH_OTP_NV_COUNTERS_AREA_SIZE + \
                                          FLASH_AREA_SYSTEM_RESERVED_SIZE)
 
 #if (FLASH_DATA_AREA_OFFSET + FLASH_DATA_AREA_SIZE) > (FLASH_TOTAL_SIZE)
 #error "Out of Flash memory"
 #endif
 
+#define TFM_HAL_FLASH_PROGRAM_UNIT      0x1
+
 /* Protected Storage (PS) Service definitions
  * Note: Further documentation of these definitions can be found in the
  * TF-M PS Integration Guide.
  */
-#define PS_FLASH_DEV_NAME Driver_FLASH0
+#define TFM_HAL_PS_FLASH_DRIVER Driver_FLASH0
 
 /* In this target the CMSIS driver requires only the offset from the base
  * address instead of the full memory address.
  */
-#define PS_FLASH_AREA_ADDR     FLASH_PS_AREA_OFFSET
-/* Dedicated flash area for PS */
-#define PS_FLASH_AREA_SIZE     FLASH_PS_AREA_SIZE
-#define PS_RAM_FS_SIZE         PS_FLASH_AREA_SIZE
-#define PS_SECTOR_SIZE         FLASH_AREA_IMAGE_SECTOR_SIZE
-/* Number of PS_SECTOR_SIZE per block */
-#define PS_SECTORS_PER_BLOCK   0x8
-/* Specifies the smallest flash programmable unit in bytes */
-#define PS_FLASH_PROGRAM_UNIT  0x1
+/* Base address of dedicated flash area for PS */
+#define TFM_HAL_PS_FLASH_AREA_ADDR    FLASH_PS_AREA_OFFSET
+/* Size of dedicated flash area for PS */
+#define TFM_HAL_PS_FLASH_AREA_SIZE    FLASH_PS_AREA_SIZE
+#define PS_RAM_FS_SIZE                TFM_HAL_PS_FLASH_AREA_SIZE
+/* Number of physical erase sectors per logical FS block */
+#define TFM_HAL_PS_SECTORS_PER_BLOCK  8
+/* Smallest flash programmable unit in bytes */
+#define TFM_HAL_PS_PROGRAM_UNIT       0x1
 
 /* Internal Trusted Storage (ITS) Service definitions
  * Note: Further documentation of these definitions can be found in the
@@ -138,28 +141,30 @@
  * allocated in the external flash just for development platforms that don't
  * have internal flash available.
  */
-#define ITS_FLASH_DEV_NAME Driver_FLASH0
+#define TFM_HAL_ITS_FLASH_DRIVER Driver_FLASH0
 
 /* In this target the CMSIS driver requires only the offset from the base
  * address instead of the full memory address.
  */
-#define ITS_FLASH_AREA_ADDR     FLASH_ITS_AREA_OFFSET
-/* Dedicated flash area for ITS */
-#define ITS_FLASH_AREA_SIZE     FLASH_ITS_AREA_SIZE
-#define ITS_RAM_FS_SIZE         ITS_FLASH_AREA_SIZE
-#define ITS_SECTOR_SIZE         FLASH_AREA_IMAGE_SECTOR_SIZE
-/* Number of ITS_SECTOR_SIZE per block */
-#define ITS_SECTORS_PER_BLOCK   (0x8)
-/* Specifies the smallest flash programmable unit in bytes */
-#define ITS_FLASH_PROGRAM_UNIT  (0x1)
+/* Base address of dedicated flash area for ITS */
+#define TFM_HAL_ITS_FLASH_AREA_ADDR    FLASH_ITS_AREA_OFFSET
+/* Size of dedicated flash area for ITS */
+#define TFM_HAL_ITS_FLASH_AREA_SIZE    FLASH_ITS_AREA_SIZE
+#define ITS_RAM_FS_SIZE                TFM_HAL_ITS_FLASH_AREA_SIZE
+/* Number of physical erase sectors per logical FS block */
+#define TFM_HAL_ITS_SECTORS_PER_BLOCK  8
+/* Smallest flash programmable unit in bytes */
+#define TFM_HAL_ITS_PROGRAM_UNIT       0x1
 /* Decrease flash wear slightly, at the cost of increased ITS service memory */
 #define ITS_MAX_BLOCK_DATA_COPY 512
 
-/* NV Counters definitions */
-#define TFM_NV_COUNTERS_FLASH_DEV    Driver_FLASH0
-#define TFM_NV_COUNTERS_AREA_SIZE    FLASH_NV_COUNTERS_AREA_SIZE
-#define TFM_NV_COUNTERS_SECTOR_ADDR  FLASH_NV_COUNTERS_AREA_OFFSET
-#define TFM_NV_COUNTERS_SECTOR_SIZE  FLASH_AREA_IMAGE_SECTOR_SIZE
+/* OTP / NV counter definitions */
+#define TFM_OTP_NV_COUNTERS_AREA_SIZE   (FLASH_OTP_NV_COUNTERS_AREA_SIZE / 2)
+#define TFM_OTP_NV_COUNTERS_AREA_ADDR   FLASH_OTP_NV_COUNTERS_AREA_OFFSET
+#define TFM_OTP_NV_COUNTERS_SECTOR_SIZE FLASH_OTP_NV_COUNTERS_SECTOR_SIZE
+#define TFM_OTP_NV_COUNTERS_BACKUP_AREA_ADDR (TFM_OTP_NV_COUNTERS_AREA_ADDR + \
+                                              TFM_OTP_NV_COUNTERS_AREA_SIZE)
+
 
 /* Use Flash to store Code data */
 #define S_ROM_ALIAS_BASE  (0x10000000)

@@ -1,14 +1,13 @@
 /*
- * Copyright (c) 2018-2019, Arm Limited. All rights reserved.
+ * Copyright (c) 2018-2021, Arm Limited. All rights reserved.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  *
  */
 
+#include "array.h"
 #include "psa_audit_api.h"
 #include "tfm_veneers.h"
-
-#define ARRAY_SIZE(arr) (sizeof(arr)/sizeof(arr[0]))
 
 #define API_DISPATCH(sfn_name)                               \
     tfm_##sfn_name##_veneer(                                 \
@@ -25,7 +24,6 @@
         in_vec, ARRAY_SIZE(in_vec),                          \
         NULL, 0)
 
-__attribute__((section("SFN")))
 psa_status_t psa_audit_retrieve_record(const uint32_t record_index,
                                        const uint32_t buffer_size,
                                        const uint8_t *token,
@@ -49,7 +47,6 @@ psa_status_t psa_audit_retrieve_record(const uint32_t record_index,
     return status;
 }
 
-__attribute__((section("SFN")))
 psa_status_t psa_audit_get_info(uint32_t *num_records, uint32_t *size)
 {
     psa_status_t status;
@@ -63,7 +60,6 @@ psa_status_t psa_audit_get_info(uint32_t *num_records, uint32_t *size)
     return status;
 }
 
-__attribute__((section("SFN")))
 psa_status_t psa_audit_get_record_info(const uint32_t record_index,
                                        uint32_t *size)
 {
@@ -80,7 +76,6 @@ psa_status_t psa_audit_get_record_info(const uint32_t record_index,
     return status;
 }
 
-__attribute__((section("SFN")))
 psa_status_t psa_audit_delete_record(const uint32_t record_index,
                                      const uint8_t *token,
                                      const uint32_t token_size)
@@ -96,7 +91,6 @@ psa_status_t psa_audit_delete_record(const uint32_t record_index,
     return status;
 }
 
-__attribute__((section("SFN")))
 psa_status_t psa_audit_add_record(const struct psa_audit_record *record)
 {
     psa_status_t status;

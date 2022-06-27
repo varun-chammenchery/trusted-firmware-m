@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2018-2020, Arm Limited. All rights reserved.
+ * Copyright (c) 2018-2022, Arm Limited. All rights reserved.
+ * Copyright (c) 2021, Cypress Semiconductor Corporation. All rights reserved.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  *
@@ -7,52 +8,64 @@
 
 #include <inttypes.h>
 #include <stdbool.h>
+#include "aapcs_local.h"
+#include "bitops.h"
+#include "config_impl.h"
+#include "critical_section.h"
+#include "current.h"
+#include "fih.h"
 #include "psa/client.h"
 #include "psa/service.h"
-#include "tfm_thread.h"
-#include "tfm_wait.h"
-#include "tfm_internal_defines.h"
+#include "thread.h"
+#include "internal_errors.h"
 #include "tfm_spm_hal.h"
-#include "tfm_irq_list.h"
 #include "tfm_api.h"
+#include "tfm_arch.h"
 #include "tfm_secure_api.h"
 #include "tfm_memory_utils.h"
 #include "tfm_hal_defs.h"
+#include "tfm_hal_interrupt.h"
 #include "tfm_hal_isolation.h"
 #include "spm_ipc.h"
 #include "tfm_peripherals_def.h"
 #include "tfm_core_utils.h"
+#include "tfm_nspm.h"
 #include "tfm_rpc.h"
 #include "tfm_core_trustzone.h"
-#include "tfm_list.h"
-#include "tfm_hal_isolation.h"
+#include "lists.h"
 #include "tfm_pools.h"
 #include "region.h"
-#include "region_defs.h"
-#include "spm_partition_defs.h"
 #include "psa_manifest/pid.h"
-#include "tfm/tfm_spm_services.h"
+#include "ffm/backend.h"
+#include "load/partition_defs.h"
+#include "load/service_defs.h"
+#include "load/asset_defs.h"
+#include "load/spm_load_api.h"
+#include "tfm_nspm.h"
+#if defined(CONFIG_TFM_PARTITION_META)
+#include "tfm_hal_memory_symbols.h"
+#endif
 
-#include "secure_fw/partitions/tfm_service_list.inc"
-#include "tfm_spm_db_ipc.inc"
+#if !(defined CONFIG_TFM_CONN_HANDLE_MAX_NUM) || (CONFIG_TFM_CONN_HANDLE_MAX_NUM == 0)
+#error "CONFIG_TFM_CONN_HANDLE_MAX_NUM must be defined and not zero."
+#endif
 
-/* Extern service variable */
-extern struct tfm_spm_service_t service[];
-extern const struct tfm_spm_service_db_t service_db[];
+/* Partition and service runtime data list head/runtime data table */
+static struct service_head_t services_listhead;
+struct service_t *stateless_services_ref_tbl[STATIC_HANDLE_NUM_LIMIT];
+
+#if defined(CONFIG_TFM_PARTITION_META)
+/* Indicator point to the partition meta */
+static uintptr_t *partition_meta_indicator_pos = NULL;
+#endif
 
 /* Pools */
-TFM_POOL_DECLARE(conn_handle_pool, sizeof(struct tfm_conn_handle_t),
-                 TFM_CONN_HANDLE_MAX_NUM);
+TFM_POOL_DECLARE(conn_handle_pool, sizeof(struct conn_handle_t),
+                 CONFIG_TFM_CONN_HANDLE_MAX_NUM);
 
-void tfm_irq_handler(uint32_t partition_id, psa_signal_t signal,
-                     IRQn_Type irq_line);
-
-#include "tfm_secure_irq_handlers_ipc.inc"
+extern uint32_t scheduler_lock;
 
 /*********************** Connection handle conversion APIs *******************/
-
-/* Set a minimal value here for feature expansion. */
-#define CLIENT_HANDLE_VALUE_MIN        32
 
 #define CONVERSION_FACTOR_BITOFFSET    3
 #define CONVERSION_FACTOR_VALUE        (1 << CONVERSION_FACTOR_BITOFFSET)
@@ -90,7 +103,7 @@ static uint32_t loop_index;
  *  loop_index is used to promise same handle instance is converted into
  *  different user handles in short time.
  */
-psa_handle_t tfm_spm_to_user_handle(struct tfm_conn_handle_t *handle_instance)
+psa_handle_t tfm_spm_to_user_handle(struct conn_handle_t *handle_instance)
 {
     psa_handle_t user_handle;
 
@@ -118,15 +131,15 @@ psa_handle_t tfm_spm_to_user_handle(struct tfm_conn_handle_t *handle_instance)
  *  user_handle     in RANGE[CLIENT_HANDLE_VALUE_MIN, 0x3FFFFFFF]
  *  loop_index      in RANGE[0, CONVERSION_FACTOR_VALUE - 1]
  */
-struct tfm_conn_handle_t *tfm_spm_to_handle_instance(psa_handle_t user_handle)
+struct conn_handle_t *tfm_spm_to_handle_instance(psa_handle_t user_handle)
 {
-    struct tfm_conn_handle_t *handle_instance;
+    struct conn_handle_t *handle_instance;
 
     if (user_handle == PSA_NULL_HANDLE) {
         return NULL;
     }
 
-    handle_instance = (struct tfm_conn_handle_t *)((((uintptr_t)user_handle -
+    handle_instance = (struct conn_handle_t *)((((uintptr_t)user_handle -
                       CLIENT_HANDLE_VALUE_MIN) >> CONVERSION_FACTOR_BITOFFSET) +
                       (uintptr_t)conn_handle_pool);
 
@@ -134,234 +147,101 @@ struct tfm_conn_handle_t *tfm_spm_to_handle_instance(psa_handle_t user_handle)
 }
 
 /* Service handle management functions */
-struct tfm_conn_handle_t *tfm_spm_create_conn_handle(
-                                        struct tfm_spm_service_t *service,
-                                        int32_t client_id)
+struct conn_handle_t *tfm_spm_create_conn_handle(void)
 {
-    struct tfm_conn_handle_t *p_handle;
-
-    TFM_CORE_ASSERT(service);
+    struct conn_handle_t *p_handle;
 
     /* Get buffer for handle list structure from handle pool */
-    p_handle = (struct tfm_conn_handle_t *)tfm_pool_alloc(conn_handle_pool);
+    p_handle = (struct conn_handle_t *)tfm_pool_alloc(conn_handle_pool);
     if (!p_handle) {
         return NULL;
     }
 
-    p_handle->service = service;
-    p_handle->status = TFM_HANDLE_STATUS_IDLE;
-    p_handle->client_id = client_id;
+    spm_memset(p_handle, 0, sizeof(*p_handle));
 
-    /* Add handle node to list for next psa functions */
-    tfm_list_add_tail(&service->handle_list, &p_handle->list);
+    p_handle->status = TFM_HANDLE_STATUS_IDLE;
 
     return p_handle;
 }
 
-int32_t tfm_spm_validate_conn_handle(
-                                    const struct tfm_conn_handle_t *conn_handle,
-                                    int32_t client_id)
+int32_t tfm_spm_validate_conn_handle(const struct conn_handle_t *conn_handle)
 {
-    /* Check the handle address is validated */
+    /* Check the handle address is valid */
     if (is_valid_chunk_data_in_pool(conn_handle_pool,
                                     (uint8_t *)conn_handle) != true) {
-        return IPC_ERROR_GENERIC;
+        return SPM_ERROR_GENERIC;
     }
 
-    /* Check the handle caller is correct */
-    if (conn_handle->client_id != client_id) {
-        return IPC_ERROR_GENERIC;
-    }
-
-    return IPC_SUCCESS;
+    return SPM_SUCCESS;
 }
 
-int32_t tfm_spm_free_conn_handle(struct tfm_spm_service_t *service,
-                                 struct tfm_conn_handle_t *conn_handle)
+int32_t tfm_spm_free_conn_handle(struct conn_handle_t *conn_handle)
 {
-    TFM_CORE_ASSERT(service);
+    struct critical_section_t cs_assert = CRITICAL_SECTION_STATIC_INIT;
+
     TFM_CORE_ASSERT(conn_handle != NULL);
 
-    /* Clear magic as the handler is not used anymore */
-    conn_handle->internal_msg.magic = 0;
-
-    /* Remove node from handle list */
-    tfm_list_del_node(&conn_handle->list);
-
+    CRITICAL_SECTION_ENTER(cs_assert);
     /* Back handle buffer to pool */
-    tfm_pool_free(conn_handle);
-    return IPC_SUCCESS;
-}
+    tfm_pool_free(conn_handle_pool, conn_handle);
+    CRITICAL_SECTION_LEAVE(cs_assert);
 
-int32_t tfm_spm_set_rhandle(struct tfm_spm_service_t *service,
-                            struct tfm_conn_handle_t *conn_handle,
-                            void *rhandle)
-{
-    TFM_CORE_ASSERT(service);
-    /* Set reverse handle value only be allowed for a connected handle */
-    TFM_CORE_ASSERT(conn_handle != NULL);
-
-    conn_handle->rhandle = rhandle;
-    return IPC_SUCCESS;
-}
-
-/**
- * \brief                   Get reverse handle value from connection hanlde.
- *
- * \param[in] service       Target service context pointer
- * \param[in] conn_handle   Connection handle created by
- *                          tfm_spm_create_conn_handle()
- *
- * \retval void *           Success
- * \retval "Does not return"  Panic for those:
- *                              service pointer are NULL
- *                              hanlde is \ref PSA_NULL_HANDLE
- *                              handle node does not be found
- */
-static void *tfm_spm_get_rhandle(struct tfm_spm_service_t *service,
-                                 struct tfm_conn_handle_t *conn_handle)
-{
-    TFM_CORE_ASSERT(service);
-    /* Get reverse handle value only be allowed for a connected handle */
-    TFM_CORE_ASSERT(conn_handle != NULL);
-
-    return conn_handle->rhandle;
+    return SPM_SUCCESS;
 }
 
 /* Partition management functions */
 
-struct tfm_msg_body_t *tfm_spm_get_msg_by_signal(struct partition_t *partition,
-                                                 psa_signal_t signal)
+/* This API is only used in IPC backend. */
+#if CONFIG_TFM_SPM_BACKEND_IPC == 1
+struct conn_handle_t *spm_get_handle_by_signal(struct partition_t *p_ptn,
+                                               psa_signal_t signal)
 {
-    struct tfm_list_node_t *node, *head;
-    struct tfm_msg_body_t *tmp_msg, *msg = NULL;
+    struct conn_handle_t *p_handle_iter;
+    struct conn_handle_t **pr_handle_iter, **last_found_handle_holder = NULL;
+    struct critical_section_t cs_assert = CRITICAL_SECTION_STATIC_INIT;
+    uint32_t nr_found_msgs = 0;
 
-    TFM_CORE_ASSERT(partition);
+    CRITICAL_SECTION_ENTER(cs_assert);
 
-    head = &partition->msg_list;
-
-    if (tfm_list_is_empty(head)) {
-        return NULL;
-    }
-
-    /*
-     * There may be multiple messages for this RoT Service signal, do not clear
-     * partition mask until no remaining message. Search may be optimized.
-     */
-    TFM_LIST_FOR_EACH(node, head) {
-        tmp_msg = TFM_GET_CONTAINER_PTR(node, struct tfm_msg_body_t, msg_node);
-        if (tmp_msg->service->service_db->signal == signal && msg) {
-            return msg;
-        } else if (tmp_msg->service->service_db->signal == signal) {
-            msg = tmp_msg;
-            tfm_list_del_node(node);
+    /* Return the last found message which applies a FIFO mechanism. */
+    UNI_LIST_FOREACH_NODE_PNODE(pr_handle_iter, p_handle_iter,
+                                p_ptn, p_handles) {
+        if (p_handle_iter->service->p_ldinf->signal == signal) {
+            last_found_handle_holder = pr_handle_iter;
+            nr_found_msgs++;
         }
     }
 
-    partition->signals_asserted &= ~signal;
+    if (last_found_handle_holder) {
+        p_handle_iter = *last_found_handle_holder;
+        UNI_LIST_REMOVE_NODE_BY_PNODE(last_found_handle_holder, p_handles);
 
-    return msg;
-}
-
-/**
- * \brief Returns the index of the partition with the given partition ID.
- *
- * \param[in] partition_id     Partition id
- *
- * \return the partition idx if partition_id is valid,
- *         \ref SPM_INVALID_PARTITION_IDX othervise
- */
-static uint32_t get_partition_idx(uint32_t partition_id)
-{
-    uint32_t i;
-
-    if (partition_id == INVALID_PARTITION_ID) {
-        return SPM_INVALID_PARTITION_IDX;
-    }
-
-    for (i = 0; i < g_spm_partition_db.partition_count; ++i) {
-        if (g_spm_partition_db.partitions[i].static_data->partition_id ==
-            partition_id) {
-            return i;
+        if (nr_found_msgs == 1) {
+            p_ptn->signals_asserted &= ~signal;
         }
     }
-    return SPM_INVALID_PARTITION_IDX;
+
+    CRITICAL_SECTION_LEAVE(cs_assert);
+
+    return p_handle_iter;
 }
+#endif /* CONFIG_TFM_SPM_BACKEND_IPC == 1 */
 
-/**
- * \brief Get the flags associated with a partition
- *
- * \param[in] partition_idx     Partition index
- *
- * \return Flags associated with the partition
- *
- * \note This function doesn't check if partition_idx is valid.
- */
-static uint32_t tfm_spm_partition_get_flags(uint32_t partition_idx)
+struct service_t *tfm_spm_get_service_by_sid(uint32_t sid)
 {
-    return g_spm_partition_db.partitions[partition_idx].static_data->
-           partition_flags;
-}
+    struct service_t *p_prev, *p_curr;
 
-#if TFM_LVL != 1
-/**
- * \brief Change the privilege mode for partition thread mode.
- *
- * \param[in] privileged        Privileged mode,
- *                                \ref TFM_PARTITION_PRIVILEGED_MODE
- *                                and \ref TFM_PARTITION_UNPRIVILEGED_MODE
- *
- * \note Barrier instructions are not called by this function, and if
- *       it is called in thread mode, it might be necessary to call
- *       them after this function returns.
- */
-static void tfm_spm_partition_change_privilege(uint32_t privileged)
-{
-    CONTROL_Type ctrl;
-
-    ctrl.w = __get_CONTROL();
-
-    if (privileged == TFM_PARTITION_PRIVILEGED_MODE) {
-        ctrl.b.nPRIV = 0;
-    } else {
-        ctrl.b.nPRIV = 1;
-    }
-
-    __set_CONTROL(ctrl.w);
-}
-#endif /* if(TFM_LVL != 1) */
-
-uint32_t tfm_spm_partition_get_privileged_mode(uint32_t partition_flags)
-{
-    if (partition_flags & SPM_PART_FLAG_PSA_ROT) {
-        return TFM_PARTITION_PRIVILEGED_MODE;
-    } else {
-        return TFM_PARTITION_UNPRIVILEGED_MODE;
-    }
-}
-
-bool tfm_is_partition_privileged(uint32_t partition_idx)
-{
-    uint32_t flags = tfm_spm_partition_get_flags(partition_idx);
-
-    return tfm_spm_partition_get_privileged_mode(flags) ==
-           TFM_PARTITION_PRIVILEGED_MODE;
-}
-
-struct tfm_spm_service_t *tfm_spm_get_service_by_sid(uint32_t sid)
-{
-    uint32_t i, num;
-
-    num = sizeof(service) / sizeof(struct tfm_spm_service_t);
-    for (i = 0; i < num; i++) {
-        if (service[i].service_db->sid == sid) {
-            return &service[i];
+    UNI_LIST_FOREACH_NODE_PREV(p_prev, p_curr, &services_listhead, next) {
+        if (p_curr->p_ldinf->sid == sid) {
+            UNI_LIST_MOVE_AFTER(&services_listhead, p_prev, p_curr, next);
+            return p_curr;
         }
     }
 
     return NULL;
 }
 
+#if CONFIG_TFM_DOORBELL_API == 1
 /**
  * \brief                   Get the partition context by partition ID.
  *
@@ -371,83 +251,97 @@ struct tfm_spm_service_t *tfm_spm_get_service_by_sid(uint32_t sid)
  * \retval "Not NULL"       Target partition context pointer,
  *                          \ref partition_t structures
  */
-static struct partition_t *tfm_spm_get_partition_by_id(int32_t partition_id)
+struct partition_t *tfm_spm_get_partition_by_id(int32_t partition_id)
 {
-    uint32_t idx = get_partition_idx(partition_id);
+    struct partition_t *p_part;
 
-    if (idx != SPM_INVALID_PARTITION_IDX) {
-        return &(g_spm_partition_db.partitions[idx]);
+    UNI_LIST_FOREACH(p_part, PARTITION_LIST_ADDR, next) {
+        if (p_part->p_ldinf->pid == partition_id) {
+            return p_part;
+        }
     }
+
     return NULL;
 }
+#endif /* CONFIG_TFM_DOORBELL_API == 1 */
 
-struct partition_t *tfm_spm_get_running_partition(void)
-{
-    struct tfm_core_thread_t *pth = tfm_core_thrd_get_curr_thread();
-    struct partition_t *partition;
-
-    partition = TFM_GET_CONTAINER_PTR(pth, struct partition_t, sp_thread);
-
-    return partition;
-}
-
-int32_t tfm_spm_check_client_version(struct tfm_spm_service_t *service,
+int32_t tfm_spm_check_client_version(struct service_t *service,
                                      uint32_t version)
 {
     TFM_CORE_ASSERT(service);
 
-    switch (service->service_db->version_policy) {
-    case TFM_VERSION_POLICY_RELAXED:
-        if (version > service->service_db->version) {
-            return IPC_ERROR_VERSION;
+    switch (SERVICE_GET_VERSION_POLICY(service->p_ldinf->flags)) {
+    case SERVICE_VERSION_POLICY_RELAXED:
+        if (version > service->p_ldinf->version) {
+            return SPM_ERROR_VERSION;
         }
         break;
-    case TFM_VERSION_POLICY_STRICT:
-        if (version != service->service_db->version) {
-            return IPC_ERROR_VERSION;
+    case SERVICE_VERSION_POLICY_STRICT:
+        if (version != service->p_ldinf->version) {
+            return SPM_ERROR_VERSION;
         }
         break;
     default:
-        return IPC_ERROR_VERSION;
+        return SPM_ERROR_VERSION;
     }
-    return IPC_SUCCESS;
+    return SPM_SUCCESS;
 }
 
 int32_t tfm_spm_check_authorization(uint32_t sid,
-                                    struct tfm_spm_service_t *service,
+                                    struct service_t *service,
                                     bool ns_caller)
 {
     struct partition_t *partition = NULL;
+    uint32_t *dep;
     int32_t i;
 
     TFM_CORE_ASSERT(service);
 
     if (ns_caller) {
-        if (!service->service_db->non_secure_client) {
-            return IPC_ERROR_GENERIC;
+        if (!SERVICE_IS_NS_ACCESSIBLE(service->p_ldinf->flags)) {
+            return SPM_ERROR_GENERIC;
         }
     } else {
-        partition = tfm_spm_get_running_partition();
+        partition = GET_CURRENT_COMPONENT();
         if (!partition) {
             tfm_core_panic();
         }
 
-        for (i = 0; i < partition->static_data->dependencies_num; i++) {
-            if (partition->static_data->p_dependencies[i] == sid) {
+        dep = (uint32_t *)LOAD_INFO_DEPS(partition->p_ldinf);
+        for (i = 0; i < partition->p_ldinf->ndeps; i++) {
+            if (dep[i] == sid) {
                 break;
             }
         }
 
-        if (i == partition->static_data->dependencies_num) {
-            return IPC_ERROR_GENERIC;
+        if (i == partition->p_ldinf->ndeps) {
+            return SPM_ERROR_GENERIC;
         }
     }
-    return IPC_SUCCESS;
+    return SPM_SUCCESS;
 }
 
 /* Message functions */
+#if CONFIG_TFM_CONNECTION_BASED_SERVICE_API == 1
+struct conn_handle_t *spm_get_handle_by_client_handle(psa_handle_t handle,
+                                                      int32_t client_id)
+{
+    struct conn_handle_t *p_conn_handle = tfm_spm_to_handle_instance(handle);
 
-struct tfm_msg_body_t *tfm_spm_get_msg_from_handle(psa_handle_t msg_handle)
+    if (tfm_spm_validate_conn_handle(p_conn_handle) != SPM_SUCCESS) {
+        return NULL;
+    }
+
+    /* Validate the caller id in the connection handle equals client_id. */
+    if (p_conn_handle->msg.client_id != client_id) {
+        return NULL;
+    }
+
+    return p_conn_handle;
+}
+#endif
+
+struct conn_handle_t *spm_get_handle_by_msg_handle(psa_handle_t msg_handle)
 {
     /*
      * The message handler passed by the caller is considered invalid in the
@@ -455,48 +349,28 @@ struct tfm_msg_body_t *tfm_spm_get_msg_from_handle(psa_handle_t msg_handle)
      *   1. Not a valid message handle. (The address of a message is not the
      *      address of a possible handle from the pool
      *   2. Handle not belongs to the caller partition (The handle is either
-     *      unused, or owned by anither partition)
+     *      unused, or owned by another partition)
      * Check the conditions above
      */
-    struct tfm_msg_body_t *p_msg;
-    uint32_t partition_id;
-    struct tfm_conn_handle_t *p_conn_handle =
-                                     tfm_spm_to_handle_instance(msg_handle);
+    int32_t partition_id;
+    struct conn_handle_t *p_conn_handle =
+                                    tfm_spm_to_handle_instance(msg_handle);
 
-    if (is_valid_chunk_data_in_pool(
-        conn_handle_pool, (uint8_t *)p_conn_handle) != 1) {
-        return NULL;
-    }
-
-    p_msg = &p_conn_handle->internal_msg;
-
-    /*
-     * Check that the magic number is correct. This proves that the message
-     * structure contains an active message.
-     */
-    if (p_msg->magic != TFM_MSG_MAGIC) {
+    if (tfm_spm_validate_conn_handle(p_conn_handle) != SPM_SUCCESS) {
         return NULL;
     }
 
     /* Check that the running partition owns the message */
     partition_id = tfm_spm_partition_get_running_partition_id();
-    if (partition_id != p_msg->service->partition->static_data->partition_id) {
+    if (partition_id != p_conn_handle->service->partition->p_ldinf->pid) {
         return NULL;
     }
 
-    return p_msg;
+    return p_conn_handle;
 }
 
-struct tfm_msg_body_t *
- tfm_spm_get_msg_buffer_from_conn_handle(struct tfm_conn_handle_t *conn_handle)
-{
-    TFM_CORE_ASSERT(conn_handle != NULL);
-
-    return &(conn_handle->internal_msg);
-}
-
-void tfm_spm_fill_msg(struct tfm_msg_body_t *msg,
-                      struct tfm_spm_service_t *service,
+void spm_fill_message(struct conn_handle_t *conn_handle,
+                      struct service_t *service,
                       psa_handle_t handle,
                       int32_t type, int32_t client_id,
                       psa_invec *invec, size_t in_len,
@@ -504,9 +378,8 @@ void tfm_spm_fill_msg(struct tfm_msg_body_t *msg,
                       psa_outvec *caller_outvec)
 {
     uint32_t i;
-    struct tfm_conn_handle_t *conn_handle;
 
-    TFM_CORE_ASSERT(msg);
+    TFM_CORE_ASSERT(conn_handle);
     TFM_CORE_ASSERT(service);
     TFM_CORE_ASSERT(!(invec == NULL && in_len != 0));
     TFM_CORE_ASSERT(!(outvec == NULL && out_len != 0));
@@ -515,79 +388,46 @@ void tfm_spm_fill_msg(struct tfm_msg_body_t *msg,
     TFM_CORE_ASSERT(in_len + out_len <= PSA_MAX_IOVEC);
 
     /* Clear message buffer before using it */
-    spm_memset(msg, 0, sizeof(struct tfm_msg_body_t));
+    spm_memset(&conn_handle->msg, 0, sizeof(psa_msg_t));
 
-    tfm_event_init(&msg->ack_evnt);
-    msg->magic = TFM_MSG_MAGIC;
-    msg->service = service;
-    msg->caller_outvec = caller_outvec;
-    msg->msg.client_id = client_id;
+    THRD_SYNC_INIT(&conn_handle->ack_evnt);
+    conn_handle->service = service;
+    conn_handle->p_client = GET_CURRENT_COMPONENT();
+    conn_handle->caller_outvec = caller_outvec;
+    conn_handle->msg.client_id = client_id;
 
     /* Copy contents */
-    msg->msg.type = type;
+    conn_handle->msg.type = type;
 
     for (i = 0; i < in_len; i++) {
-        msg->msg.in_size[i] = invec[i].len;
-        msg->invec[i].base = invec[i].base;
+        conn_handle->msg.in_size[i] = invec[i].len;
+        conn_handle->invec[i].base = invec[i].base;
     }
 
     for (i = 0; i < out_len; i++) {
-        msg->msg.out_size[i] = outvec[i].len;
-        msg->outvec[i].base = outvec[i].base;
-        /* Out len is used to record the writed number, set 0 here again */
-        msg->outvec[i].len = 0;
+        conn_handle->msg.out_size[i] = outvec[i].len;
+        conn_handle->outvec[i].base = outvec[i].base;
+        /* Out len is used to record the wrote number, set 0 here again */
+        conn_handle->outvec[i].len = 0;
     }
 
     /* Use the user connect handle as the message handle */
-    msg->msg.handle = handle;
-
-    conn_handle = tfm_spm_to_handle_instance(handle);
-    /* For connected handle, set rhandle to every message */
-    if (conn_handle) {
-        msg->msg.rhandle = tfm_spm_get_rhandle(service, conn_handle);
-    }
+    conn_handle->msg.handle = handle;
+    conn_handle->msg.rhandle = conn_handle->rhandle;
 
     /* Set the private data of NSPE client caller in multi-core topology */
     if (TFM_CLIENT_ID_IS_NS(client_id)) {
-        tfm_rpc_set_caller_data(msg, client_id);
+        tfm_rpc_set_caller_data(conn_handle, client_id);
     }
 }
 
-int32_t tfm_spm_send_event(struct tfm_spm_service_t *service,
-                           struct tfm_msg_body_t *msg)
-{
-    struct partition_t *partition = service->partition;
-
-    TFM_CORE_ASSERT(service);
-    TFM_CORE_ASSERT(msg);
-
-    /* Add message to partition message list tail */
-    tfm_list_add_tail(&partition->msg_list, &msg->msg_node);
-
-    /* Messages put. Update signals */
-    partition->signals_asserted |= service->service_db->signal;
-
-    tfm_event_wake(&partition->event,
-                   (partition->signals_asserted & partition->signals_waiting));
-
-    /*
-     * If it is a NS request via RPC, it is unnecessary to block current
-     * thread.
-     */
-    if (!is_tfm_rpc_msg(msg)) {
-        tfm_event_wait(&msg->ack_evnt);
-    }
-
-    return IPC_SUCCESS;
-}
-
-uint32_t tfm_spm_partition_get_running_partition_id(void)
+int32_t tfm_spm_partition_get_running_partition_id(void)
 {
     struct partition_t *partition;
 
-    partition = tfm_spm_get_running_partition();
-    if (partition && partition->static_data) {
-        return partition->static_data->partition_id;
+    partition = GET_CURRENT_COMPONENT();
+    if (partition && partition->p_ldinf) {
+        return partition->p_ldinf->pid;
     } else {
         return INVALID_PARTITION_ID;
     }
@@ -602,15 +442,15 @@ int32_t tfm_memory_check(const void *buffer, size_t len, bool ns_caller,
 
     /* If len is zero, this indicates an empty buffer and base is ignored */
     if (len == 0) {
-        return IPC_SUCCESS;
+        return SPM_SUCCESS;
     }
 
     if (!buffer) {
-        return IPC_ERROR_BAD_PARAMETERS;
+        return SPM_ERROR_BAD_PARAMETERS;
     }
 
     if ((uintptr_t)buffer > (UINTPTR_MAX - len)) {
-        return IPC_ERROR_MEMORY_CHECK;
+        return SPM_ERROR_MEMORY_CHECK;
     }
 
     if (access == TFM_MEMORY_ACCESS_RW) {
@@ -632,179 +472,161 @@ int32_t tfm_memory_check(const void *buffer, size_t len, bool ns_caller,
     err = tfm_hal_memory_has_access((uintptr_t)buffer, len, attr);
 
     if (err == TFM_HAL_SUCCESS) {
-        return IPC_SUCCESS;
+        return SPM_SUCCESS;
     }
 
-    return IPC_ERROR_MEMORY_CHECK;
+    return SPM_ERROR_MEMORY_CHECK;
+}
+
+bool tfm_spm_is_ns_caller(void)
+{
+    struct partition_t *partition = GET_CURRENT_COMPONENT();
+
+    if (!partition) {
+        tfm_core_panic();
+    }
+
+    return (partition->p_ldinf->pid == TFM_SP_NON_SECURE_ID);
+}
+
+int32_t tfm_spm_get_client_id(bool ns_caller)
+{
+    int32_t client_id;
+
+    if (ns_caller) {
+        client_id = tfm_nspm_get_current_client_id();
+    } else {
+        client_id = tfm_spm_partition_get_running_partition_id();
+    }
+
+    if (ns_caller != (client_id < 0)) {
+        /* NS client ID must be negative and Secure ID must >= 0 */
+        tfm_core_panic();
+    }
+
+    return client_id;
 }
 
 uint32_t tfm_spm_init(void)
 {
-    uint32_t i, j, num;
     struct partition_t *partition;
-    struct tfm_core_thread_t *pth, *p_ns_entry_thread = NULL;
-    const struct tfm_spm_partition_platform_data_t **platform_data_p;
+    const struct partition_load_info_t *p_pldi;
+    uint32_t service_setting = 0;
+
+#ifdef TFM_FIH_PROFILE_ON
+    fih_int fih_rc = FIH_FAILURE;
+#endif
 
     tfm_pool_init(conn_handle_pool,
                   POOL_BUFFER_SIZE(conn_handle_pool),
-                  sizeof(struct tfm_conn_handle_t),
-                  TFM_CONN_HANDLE_MAX_NUM);
+                  sizeof(struct conn_handle_t),
+                  CONFIG_TFM_CONN_HANDLE_MAX_NUM);
 
-    /* Init partition first for it will be used when init service */
-    for (i = 0; i < g_spm_partition_db.partition_count; i++) {
-        partition = &g_spm_partition_db.partitions[i];
+    UNI_LISI_INIT_NODE(PARTITION_LIST_ADDR, next);
+    UNI_LISI_INIT_NODE(&services_listhead, next);
 
-        if (!partition || !partition->memory_data || !partition->static_data) {
+    /* Init the nonsecure context. */
+    tfm_nspm_ctx_init();
+
+    while (1) {
+        partition = load_a_partition_assuredly(PARTITION_LIST_ADDR);
+        if (partition == NO_MORE_PARTITION) {
+            break;
+        }
+
+        p_pldi = partition->p_ldinf;
+
+        if (p_pldi->nservices) {
+            service_setting = load_services_assuredly(
+                                partition,
+                                &services_listhead,
+                                stateless_services_ref_tbl,
+                                sizeof(stateless_services_ref_tbl));
+        }
+
+        if (p_pldi->nirqs) {
+            load_irqs_assuredly(partition);
+        }
+
+        /* Bind the partition with platform. */
+#if TFM_FIH_PROFILE_ON
+        FIH_CALL(tfm_hal_bind_boundaries, fih_rc, partition->p_ldinf,
+                 &partition->p_boundaries);
+        if (fih_not_eq(fih_rc, fih_int_encode(TFM_HAL_SUCCESS))) {
             tfm_core_panic();
         }
-
-        if (!(partition->static_data->partition_flags & SPM_PART_FLAG_IPC)) {
+#else /* TFM_FIH_PROFILE_ON */
+        if (tfm_hal_bind_boundaries(partition->p_ldinf,
+                                    &partition->p_boundaries)
+                != TFM_HAL_SUCCESS) {
             tfm_core_panic();
         }
+#endif /* TFM_FIH_PROFILE_ON */
 
-        /* Check if the PSA framework version matches. */
-        if (partition->static_data->psa_framework_version !=
-            PSA_FRAMEWORK_VERSION) {
-            ERROR_MSG("Warning: PSA Framework Verison does not match!");
-            continue;
-        }
-
-        platform_data_p = partition->platform_data_list;
-        if (platform_data_p != NULL) {
-            while ((*platform_data_p) != NULL) {
-                if (tfm_spm_hal_configure_default_isolation(i,
-                            *platform_data_p) != TFM_PLAT_ERR_SUCCESS) {
-                    tfm_core_panic();
-                }
-                ++platform_data_p;
-            }
-        }
-
-        /* Add PSA_DOORBELL signal to assigned_signals */
-        partition->signals_allowed |= PSA_DOORBELL;
-
-        /* TODO: This can be optimized by generating the assigned signal
-         *       in code generation time.
-         */
-        for (j = 0; j < tfm_core_irq_signals_count; ++j) {
-            if (tfm_core_irq_signals[j].partition_id ==
-                                        partition->static_data->partition_id) {
-                partition->signals_allowed |=
-                                        tfm_core_irq_signals[j].signal_value;
-            }
-        }
-
-        tfm_event_init(&partition->event);
-        tfm_list_init(&partition->msg_list);
-
-        pth = &partition->sp_thread;
-        if (!pth) {
-            tfm_core_panic();
-        }
-
-        tfm_core_thrd_init(pth,
-                           (tfm_core_thrd_entry_t)
-                                         partition->static_data->partition_init,
-                           NULL,
-                           (uintptr_t)partition->memory_data->stack_top,
-                           (uintptr_t)partition->memory_data->stack_bottom);
-
-        pth->prior = partition->static_data->partition_priority;
-
-        if (partition->static_data->partition_id == TFM_SP_NON_SECURE_ID) {
-            p_ns_entry_thread = pth;
-            pth->param = (void *)tfm_spm_hal_get_ns_entry_point();
-        }
-
-        /* Kick off */
-        if (tfm_core_thrd_start(pth) != THRD_SUCCESS) {
-            tfm_core_panic();
-        }
+        backend_instance.comp_init_assuredly(partition, service_setting);
     }
 
-    /* Init Service */
-    num = sizeof(service) / sizeof(struct tfm_spm_service_t);
-    for (i = 0; i < num; i++) {
-        service[i].service_db = &service_db[i];
-        partition =
-            tfm_spm_get_partition_by_id(service[i].service_db->partition_id);
-        if (!partition) {
-            tfm_core_panic();
-        }
-        service[i].partition = partition;
-        partition->signals_allowed |= service[i].service_db->signal;
+#if defined(CONFIG_TFM_PARTITION_META)
+    partition_meta_indicator_pos = (uintptr_t *)hal_mem_sp_meta_start;
+#endif
 
-        tfm_list_init(&service[i].handle_list);
-    }
-
-    /*
-     * All threads initialized, start the scheduler.
-     *
-     * NOTE:
-     * It is worthy to give the thread object to scheduler if the background
-     * context belongs to one of the threads. Here the background thread is the
-     * initialization thread who calls SPM SVC, which re-uses the non-secure
-     * entry thread's stack. After SPM initialization is done, this stack is
-     * cleaned up and the background context is never going to return. Tell
-     * the scheduler that the current thread is non-secure entry thread.
-     */
-    tfm_core_thrd_start_scheduler(p_ns_entry_thread);
-
-    return p_ns_entry_thread->arch_ctx.lr;
+    return backend_instance.system_run();
 }
 
-void tfm_pendsv_do_schedule(struct tfm_arch_ctx_t *p_actx)
+uint64_t do_schedule(void)
 {
-#if TFM_LVL != 1
-    struct partition_t *p_next_partition;
-    uint32_t is_privileged;
-#endif
-    struct tfm_core_thread_t *pth_next = tfm_core_thrd_get_next_thread();
-    struct tfm_core_thread_t *pth_curr = tfm_core_thrd_get_curr_thread();
+    AAPCS_DUAL_U32_T ctx_ctrls;
+    struct partition_t *p_part_curr, *p_part_next;
+    struct context_ctrl_t *p_curr_ctx;
+    struct thread_t *pth_next = thrd_next();
+    struct critical_section_t cs = CRITICAL_SECTION_STATIC_INIT;
 
-    if (pth_next != NULL && pth_curr != pth_next) {
-#if TFM_LVL != 1
-        p_next_partition = TFM_GET_CONTAINER_PTR(pth_next,
-                                                 struct partition_t,
-                                                 sp_thread);
+    p_curr_ctx = (struct context_ctrl_t *)(CURRENT_THREAD->p_context_ctrl);
 
-        if (p_next_partition->static_data->partition_flags &
-            SPM_PART_FLAG_PSA_ROT) {
-            is_privileged = TFM_PARTITION_PRIVILEGED_MODE;
-        } else {
-            is_privileged = TFM_PARTITION_UNPRIVILEGED_MODE;
+    AAPCS_DUAL_U32_SET(ctx_ctrls, (uint32_t)p_curr_ctx, (uint32_t)p_curr_ctx);
+
+    p_part_curr = GET_CURRENT_COMPONENT();
+    p_part_next = GET_THRD_OWNER(pth_next);
+
+    if (scheduler_lock != SCHEDULER_LOCKED && pth_next != NULL &&
+        p_part_curr != p_part_next) {
+        /* Check if there is enough room on stack to save more context */
+        if ((p_curr_ctx->sp_limit +
+                sizeof(struct tfm_additional_context_t)) > __get_PSP()) {
+            tfm_core_panic();
         }
 
-        tfm_spm_partition_change_privilege(is_privileged);
-#if TFM_LVL == 3
+        CRITICAL_SECTION_ENTER(cs);
         /*
-         * FIXME: To implement isolations among partitions in isolation level 3,
-         * each partition needs to run in unprivileged mode. Currently some
-         * PRoTs cannot work in unprivileged mode, make them privileged now.
+         * If required, let the platform update boundary based on its
+         * implementation. Change privilege, MPU or other configurations.
          */
-        if (is_privileged == TFM_PARTITION_UNPRIVILEGED_MODE) {
-            /* FIXME: only MPU-based implementations are supported currently */
-            if (tfm_hal_mpu_update_partition_boundary(
-                                      p_next_partition->memory_data->data_start,
-                                      p_next_partition->memory_data->data_limit)
-                                                           != TFM_HAL_SUCCESS) {
+        if (p_part_curr->p_boundaries != p_part_next->p_boundaries) {
+            if (tfm_hal_update_boundaries(p_part_next->p_ldinf,
+                                          p_part_next->p_boundaries)
+                                                        != TFM_HAL_SUCCESS) {
                 tfm_core_panic();
             }
         }
-#endif /* TFM_LVL == 3 */
-#endif /* TFM_LVL != 1 */
+        ARCH_FLUSH_FP_CONTEXT();
 
-        tfm_core_thrd_switch_context(p_actx, pth_curr, pth_next);
+        AAPCS_DUAL_U32_SET_A1(ctx_ctrls, (uint32_t)pth_next->p_context_ctrl);
+
+        CURRENT_THREAD = pth_next;
+        CRITICAL_SECTION_LEAVE(cs);
     }
 
-    /*
-     * Handle pending mailbox message from NS in multi-core topology.
-     * Empty operation on single Armv8-M platform.
-     */
-    tfm_rpc_client_call_handler();
+#if defined(CONFIG_TFM_PARTITION_META)
+    /* Update meta indicator */
+    if (partition_meta_indicator_pos && (p_part_next->p_metadata)) {
+        *partition_meta_indicator_pos = (uintptr_t)(p_part_next->p_metadata);
+    }
+#endif
+
+    return AAPCS_DUAL_U32_AS_U64(ctx_ctrls);
 }
 
-void update_caller_outvec_len(struct tfm_msg_body_t *msg)
+void update_caller_outvec_len(struct conn_handle_t *handle)
 {
     uint32_t i;
 
@@ -812,232 +634,42 @@ void update_caller_outvec_len(struct tfm_msg_body_t *msg)
      * FixeMe: abstract these part into dedicated functions to avoid
      * accessing thread context in psa layer
      */
-    /* If it is a NS request via RPC, the owner of this message is not set */
-    if (!is_tfm_rpc_msg(msg)) {
-        TFM_CORE_ASSERT(msg->ack_evnt.owner->state == THRD_STATE_BLOCK);
+    /*
+     * If it is a NS request via RPC, the owner of this message is not set.
+     * Or if it is a SFN message, it does not have owner thread state either.
+     */
+    if ((!is_tfm_rpc_msg(handle)) && (handle->sfn_magic != TFM_MSG_MAGIC_SFN)) {
+        TFM_CORE_ASSERT(handle->ack_evnt.owner->state == THRD_STATE_BLOCK);
     }
 
     for (i = 0; i < PSA_MAX_IOVEC; i++) {
-        if (msg->msg.out_size[i] == 0) {
+        if (handle->msg.out_size[i] == 0) {
             continue;
         }
 
-        TFM_CORE_ASSERT(msg->caller_outvec[i].base == msg->outvec[i].base);
+        TFM_CORE_ASSERT(
+            handle->caller_outvec[i].base == handle->outvec[i].base);
 
-        msg->caller_outvec[i].len = msg->outvec[i].len;
+        handle->caller_outvec[i].len = handle->outvec[i].len;
     }
 }
 
-void notify_with_signal(int32_t partition_id, psa_signal_t signal)
+void spm_assert_signal(void *p_pt, psa_signal_t signal)
 {
-    struct partition_t *partition = NULL;
+    struct critical_section_t cs_assert = CRITICAL_SECTION_STATIC_INIT;
+    struct partition_t *partition = (struct partition_t *)p_pt;
 
-    /*
-     * The value of partition_id must be greater than zero as the target of
-     * notification must be a Secure Partition, providing a Non-secure
-     * Partition ID is a fatal error.
-     */
-    if (!TFM_CLIENT_ID_IS_S(partition_id)) {
-        tfm_core_panic();
-    }
-
-    /*
-     * It is a fatal error if partition_id does not correspond to a Secure
-     * Partition.
-     */
-    partition = tfm_spm_get_partition_by_id(partition_id);
     if (!partition) {
         tfm_core_panic();
     }
+
+    CRITICAL_SECTION_ENTER(cs_assert);
 
     partition->signals_asserted |= signal;
 
-    /*
-     * The target partition may be blocked with waiting for signals after
-     * called psa_wait(). Set the return value with the available signals
-     * before wake it up with tfm_event_signal().
-     */
-    tfm_event_wake(&partition->event,
-                   partition->signals_asserted & partition->signals_waiting);
-}
-
-/**
- * \brief assert signal for a given IRQ line.
- *
- * \param[in] partition_id      The ID of the partition which handles this IRQ
- * \param[in] signal            The signal associated with this IRQ
- * \param[in] irq_line          The number of the IRQ line
- *
- * \retval void                 Success.
- * \retval "Does not return"    Partition ID is invalid
- */
-void tfm_irq_handler(uint32_t partition_id, psa_signal_t signal,
-                     IRQn_Type irq_line)
-{
-    tfm_spm_hal_disable_irq(irq_line);
-    notify_with_signal(partition_id, signal);
-}
-
-int32_t get_irq_line_for_signal(int32_t partition_id,
-                                psa_signal_t signal,
-                                IRQn_Type *irq_line)
-{
-    size_t i;
-
-    for (i = 0; i < tfm_core_irq_signals_count; ++i) {
-        if (tfm_core_irq_signals[i].partition_id == partition_id &&
-            tfm_core_irq_signals[i].signal_value == signal) {
-            *irq_line = tfm_core_irq_signals[i].irq_line;
-            return IPC_SUCCESS;
-        }
-    }
-    return IPC_ERROR_GENERIC;
-}
-
-void tfm_spm_enable_irq(uint32_t *args)
-{
-    struct tfm_state_context_t *svc_ctx = (struct tfm_state_context_t *)args;
-    psa_signal_t irq_signal = svc_ctx->r0;
-    IRQn_Type irq_line = (IRQn_Type) 0;
-    int32_t ret;
-    struct partition_t *partition = NULL;
-
-    /* It is a fatal error if passed signal indicates more than one signals. */
-    if (!tfm_is_one_bit_set(irq_signal)) {
-        tfm_core_panic();
+    if (partition->signals_waiting & signal) {
+        backend_instance.wake_up(partition);
     }
 
-    partition = tfm_spm_get_running_partition();
-    if (!partition) {
-        tfm_core_panic();
-    }
-
-    ret = get_irq_line_for_signal(partition->static_data->partition_id,
-                                  irq_signal, &irq_line);
-    /* It is a fatal error if passed signal is not an interrupt signal. */
-    if (ret != IPC_SUCCESS) {
-        tfm_core_panic();
-    }
-
-    tfm_spm_hal_enable_irq(irq_line);
-}
-
-void tfm_spm_disable_irq(uint32_t *args)
-{
-    struct tfm_state_context_t *svc_ctx = (struct tfm_state_context_t *)args;
-    psa_signal_t irq_signal = svc_ctx->r0;
-    IRQn_Type irq_line = (IRQn_Type) 0;
-    int32_t ret;
-    struct partition_t *partition = NULL;
-
-    /* It is a fatal error if passed signal indicates more than one signals. */
-    if (!tfm_is_one_bit_set(irq_signal)) {
-        tfm_core_panic();
-    }
-
-    partition = tfm_spm_get_running_partition();
-    if (!partition) {
-        tfm_core_panic();
-    }
-
-    ret = get_irq_line_for_signal(partition->static_data->partition_id,
-                                  irq_signal, &irq_line);
-    /* It is a fatal error if passed signal is not an interrupt signal. */
-    if (ret != IPC_SUCCESS) {
-        tfm_core_panic();
-    }
-
-    tfm_spm_hal_disable_irq(irq_line);
-}
-
-void tfm_spm_validate_caller(struct partition_t *p_cur_sp, uint32_t *p_ctx,
-                             uint32_t exc_return, bool ns_caller)
-{
-    uintptr_t stacked_ctx_pos;
-
-    if (ns_caller) {
-        /*
-         * The background IRQ can't be supported, since if SP is executing,
-         * the preempted context of SP can be different with the one who
-         * preempts veneer.
-         */
-        if (p_cur_sp->static_data->partition_id != TFM_SP_NON_SECURE_ID) {
-            tfm_core_panic();
-        }
-
-        /*
-         * It is non-secure caller, check if veneer stack contains
-         * multiple contexts.
-         */
-        stacked_ctx_pos = (uintptr_t)p_ctx +
-                          sizeof(struct tfm_state_context_t) +
-                          TFM_STACK_SEALED_SIZE;
-
-        if (is_stack_alloc_fp_space(exc_return)) {
-#if defined (__FPU_USED) && (__FPU_USED == 1U)
-            if (FPU->FPCCR & FPU_FPCCR_TS_Msk) {
-                stacked_ctx_pos += TFM_ADDTIONAL_FP_CONTEXT_WORDS *
-                                   sizeof(uint32_t);
-            }
-#endif
-            stacked_ctx_pos += TFM_BASIC_FP_CONTEXT_WORDS * sizeof(uint32_t);
-        }
-
-        if (stacked_ctx_pos != p_cur_sp->sp_thread.stk_top) {
-            tfm_core_panic();
-        }
-    } else if (p_cur_sp->static_data->partition_id <= 0) {
-        tfm_core_panic();
-    }
-}
-
-void tfm_spm_request_handler(const struct tfm_state_context_t *svc_ctx)
-{
-    uint32_t *res_ptr = (uint32_t *)&svc_ctx->r0;
-    uint32_t running_partition_flags = 0;
-    const struct partition_t *partition = NULL;
-
-    /* Check permissions on request type basis */
-
-    switch (svc_ctx->r0) {
-    case TFM_SPM_REQUEST_RESET_VOTE:
-        partition = tfm_spm_get_running_partition();
-        if (!partition) {
-            tfm_core_panic();
-        }
-        running_partition_flags = partition->static_data->partition_flags;
-
-        /* Currently only PSA Root of Trust services are allowed to make Reset
-         * vote request
-         */
-        if ((running_partition_flags & SPM_PART_FLAG_PSA_ROT) == 0) {
-            *res_ptr = (uint32_t)TFM_ERROR_GENERIC;
-        }
-
-        /* FixMe: this is a placeholder for checks to be performed before
-         * allowing execution of reset
-         */
-        *res_ptr = (uint32_t)TFM_SUCCESS;
-
-        break;
-    default:
-        *res_ptr = (uint32_t)TFM_ERROR_INVALID_PARAMETER;
-    }
-}
-
-enum spm_err_t tfm_spm_db_init(void)
-{
-    uint32_t i;
-
-    /* This function initialises partition db */
-
-    for (i = 0; i < g_spm_partition_db.partition_count; i++) {
-        g_spm_partition_db.partitions[i].static_data = &static_data_list[i];
-        g_spm_partition_db.partitions[i].platform_data_list =
-                                                     platform_data_list_list[i];
-        g_spm_partition_db.partitions[i].memory_data = &memory_data_list[i];
-    }
-    g_spm_partition_db.is_init = 1;
-
-    return SPM_ERR_OK;
+    CRITICAL_SECTION_LEAVE(cs_assert);
 }

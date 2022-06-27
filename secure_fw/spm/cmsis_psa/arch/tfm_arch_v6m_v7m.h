@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2020, Arm Limited. All rights reserved.
+ * Copyright (c) 2019-2021, Arm Limited. All rights reserved.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  *
@@ -20,21 +20,23 @@
 #define EXC_RETURN_FPU_FRAME_BASIC              (1 << 4)
 #endif
 
-/* Initial EXC_RETURN value in LR when a thread is loaded at the first time */
 #define EXC_RETURN_THREAD_S_PSP                 0xFFFFFFFD
+#define EXC_RETURN_HANDLER_S_MSP                0xFFFFFFF1
 
-struct tfm_arch_ctx_t {
-    uint32_t    r8;
-    uint32_t    r9;
-    uint32_t    r10;
-    uint32_t    r11;
-    uint32_t    r4;
-    uint32_t    r5;
-    uint32_t    r6;
-    uint32_t    r7;
-    uint32_t    sp;
-    uint32_t    lr;
-};
+/* Exception return behavior */
+
+/* stack pointer used to restore context: 0=MSP 1=PSP. */
+#define EXC_RETURN_SPSEL    (1UL << 2)
+/* processor mode for return: 0=Handler mode 1=Thread mod. */
+#define EXC_RETURN_MODE     (1UL << 3)
+
+/* Exception numbers */
+#define EXC_NUM_THREAD_MODE                     (0)
+#define EXC_NUM_SVCALL                          (11)
+#define EXC_NUM_PENDSV                          (14)
+
+#define SCB_ICSR_ADDR                   (0xE000ED04)
+#define SCB_ICSR_PENDSVSET_BIT          (0x10000000)
 
 /**
  * \brief Check whether Secure or Non-secure stack is used to restore stack
@@ -98,26 +100,30 @@ __STATIC_INLINE void tfm_arch_set_psplim(uint32_t psplim)
 }
 
 /**
+ * \brief Set MSP limit value.
+ *
+ * \param[in] msplim        MSP limit value to be written.
+ */
+__STATIC_INLINE void tfm_arch_set_msplim(uint32_t msplim)
+{
+    /*
+     * Defined as an empty function now.
+     * The MSP limit value can be used in more strict memory check.
+     */
+    (void)msplim;
+}
+
+/**
  * \brief Seal the thread stack.
  *
  * \param[in] stk        Thread stack address.
  *
  * \retval stack         Updated thread stack address.
  */
-__STATIC_INLINE uintptr_t tfm_arch_seal_thread_stack(uintptr_t stk)
+__STATIC_INLINE uintptr_t arch_seal_thread_stack(uintptr_t stk)
 {
     TFM_CORE_ASSERT((stk & 0x7) == 0);
     return stk;
-}
-
-/**
- * \brief Update architecture context value into hardware
- *
- * \param[in] p_actx        Pointer of context data
- */
-__STATIC_INLINE void tfm_arch_update_ctx(struct tfm_arch_ctx_t *p_actx)
-{
-    __set_PSP(p_actx->sp);
 }
 
 /**
@@ -132,6 +138,30 @@ __STATIC_INLINE void tfm_arch_init_secure_msp(uint32_t msplim)
      * The MSP limit value can be used in more strict memory check.
      */
     (void)msplim;
+}
+
+/**
+ * \brief Whether in privileged level
+ *
+ * \retval true             If current execution runs in privileged level.
+ * \retval false            If current execution runs in unprivileged level.
+ */
+__STATIC_INLINE bool tfm_arch_is_priv(void)
+{
+    CONTROL_Type ctrl;
+
+    /* If in Handler mode */
+    if (__get_IPSR()) {
+        return true;
+    }
+
+    /* If in privileged Thread mode */
+    ctrl.w = __get_CONTROL();
+    if (!ctrl.b.nPRIV) {
+        return true;
+    }
+
+    return false;
 }
 
 #endif

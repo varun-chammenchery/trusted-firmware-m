@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2020, Arm Limited. All rights reserved.
+ * Copyright (c) 2018-2021, Arm Limited. All rights reserved.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  *
@@ -13,6 +13,7 @@
 #include <stdint.h>
 
 #include "flash/its_flash.h"
+#include "its_flash_fs.h"
 #include "its_utils.h"
 #include "psa/error.h"
 
@@ -25,7 +26,14 @@ extern "C" {
  *
  * \brief Defines the supported version.
  */
-#define ITS_SUPPORTED_VERSION  0x01
+#define ITS_SUPPORTED_VERSION  0x02
+
+/*!
+ * \def ITS_BACKWARD_SUPPORTED_VERSION
+ *
+ * \brief Defines the backward supported version.
+ */
+#define ITS_BACKWARD_SUPPORTED_VERSION  0x01
 
 /*!
  * \def ITS_METADATA_INVALID_INDEX
@@ -48,6 +56,8 @@ extern "C" {
  *
  * \note The active_swap_count must be the last member to allow it to be
  *       programmed last.
+ *       The fs_version must be at the same position as it is in
+ *       its_metadata_block_header_comp_t.
  *
  * \note This structure is programmed to flash, so its size must be padded
  *       to a multiple of the maximum required flash program unit.
@@ -56,17 +66,55 @@ extern "C" {
     uint32_t scratch_dblock;    /*!< Physical block ID of the data \
                                  *   section's scratch block \
                                  */ \
-    uint8_t fs_version;         /*!< ITS system version */ \
-    uint8_t active_swap_count;  /*!< Physical block ID of the data */
+    uint8_t fs_version;         /*!< Filesystem version */ \
+    uint8_t metadata_xor;       /*!< XOR value based on the whole metadata(not \
+                                 *   including the metadata block header) \
+                                 */ \
+    uint8_t active_swap_count;  /*!< Number of times the metadata blocks have \
+                                 *   been swapped \
+                                 */
 
 struct its_metadata_block_header_t {
     _T1
 #if ((ITS_FLASH_MAX_ALIGNMENT) > 4)
     uint8_t roundup[sizeof(struct __attribute__((__aligned__(ITS_FLASH_MAX_ALIGNMENT))) { _T1 }) -
-                    sizeof(struct { _T1 })];
+                    sizeof(struct { _T1 })]; /*!< _T1 has aligned to the maximum
+                                              *   field scratch_dblock which is
+                                              *   4 bytes.
+                                              */
 #endif
 };
 #undef _T1
+
+/*!
+ * \struct its_metadata_block_header_comp_t
+ *
+ * \brief The struture of metadata block header in
+ *        ITS_BACKWARD_SUPPORTED_VERSION.
+ *
+ * \note The active_swap_count must be the last member to allow it to be
+ *       programmed last.
+ *
+ * \note This structure is programmed to flash, so its size must be padded
+ *       to a multiple of the maximum required flash program unit.
+ */
+#define _T1_COMP \
+    uint32_t scratch_dblock;    /*!< Physical block ID of the data \
+                                 *   section's scratch block \
+                                 */ \
+    uint8_t fs_version;         /*!< Filesystem version */ \
+    uint8_t active_swap_count;  /*!< Number of times the metadata blocks have \
+                                 *   been swapped \
+                                 */
+
+struct its_metadata_block_header_comp_t {
+    _T1_COMP
+#if ((ITS_FLASH_MAX_ALIGNMENT) > 4)
+    uint8_t roundup[sizeof(struct __attribute__((__aligned__(ITS_FLASH_MAX_ALIGNMENT))) { _T1_COMP }) -
+                    sizeof(struct { _T1_COMP })];
+#endif
+};
+#undef _T1_COMP
 
 /*!
  * \struct its_block_meta_t
@@ -129,7 +177,8 @@ struct its_file_meta_t {
  * \brief Structure to store the ITS flash file system context.
  */
 struct its_flash_fs_ctx_t {
-    const struct its_flash_info_t *flash_info; /**< Info for the flash device */
+    const struct its_flash_fs_config_t *cfg; /**< Filesystem configuration */
+    const struct its_flash_fs_ops_t *ops;    /**< Filesystem flash operations */
     struct its_metadata_block_header_t meta_block_header; /**< Metadata block
                                                            *   header
                                                            */
@@ -256,6 +305,21 @@ psa_status_t its_flash_fs_mblock_read_block_metadata(
                                            struct its_block_meta_t *block_meta);
 
 /**
+ * \brief Reads specified logical block metadata based on the backward
+ *        compatible FS.
+ *
+ * \param[in,out] fs_ctx      Filesystem context
+ * \param[in]     lblock      Logical block number
+ * \param[out]    block_meta  Pointer to block meta structure
+ *
+ * \return Returns error code as specified in \ref psa_status_t
+ */
+psa_status_t its_flash_fs_mblock_read_block_metadata_comp(
+                                        struct its_flash_fs_ctx_t *fs_ctx,
+                                        uint32_t lblock,
+                                        struct its_block_meta_t *block_meta);
+
+/**
  * \brief Reserves space for a file.
  *
  * \param[in,out] fs_ctx         Filesystem context
@@ -327,6 +391,33 @@ psa_status_t its_flash_fs_mblock_update_scratch_file_meta(
                                        struct its_flash_fs_ctx_t *fs_ctx,
                                        uint32_t idx,
                                        const struct its_file_meta_t *file_meta);
+
+/**
+ * \brief Moves data from source block ID to destination block ID.
+ *
+ * \param[in] fs_ctx      Filesystem context
+ * \param[in] dst_block   Destination block ID
+ * \param[in] dst_offset  Destination offset position from the init of the
+ *                        destination block
+ * \param[in] src_block   Source block ID
+ * \param[in] src_offset  Source offset position from the init of the source
+ *                        block
+ * \param[in] size        Number of bytes to moves
+ *
+ * \note This function assumes all input values are valid. That is, the address
+ *       range, based on blockid, offset and size, is a valid range in flash.
+ *       It also assumes that the destination block is already erased and ready
+ *       to be written.
+ *
+ * \return Returns PSA_SUCCESS if the function is executed correctly. Otherwise,
+ *         it returns PSA_ERROR_STORAGE_FAILURE.
+ */
+psa_status_t its_flash_fs_block_to_block_move(struct its_flash_fs_ctx_t *fs_ctx,
+                                              uint32_t dst_block,
+                                              size_t dst_offset,
+                                              uint32_t src_block,
+                                              size_t src_offset,
+                                              size_t size);
 
 #ifdef __cplusplus
 }

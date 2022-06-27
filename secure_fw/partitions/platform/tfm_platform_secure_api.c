@@ -1,17 +1,17 @@
 /*
- * Copyright (c) 2018-2020, Arm Limited. All rights reserved.
+ * Copyright (c) 2018-2021, Arm Limited. All rights reserved.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  *
  */
 
 #include "tfm_platform_api.h"
-#include "tfm_veneers.h"
 #ifdef TFM_PSA_API
 #include "psa_manifest/sid.h"
+#else
+#include "tfm_veneers.h"
 #endif
 
-__attribute__((section("SFN")))
 enum tfm_platform_err_t tfm_platform_system_reset(void)
 {
 #ifdef TFM_PSA_API
@@ -39,7 +39,6 @@ enum tfm_platform_err_t tfm_platform_system_reset(void)
 #endif /* TFM_PSA_API */
 }
 
-__attribute__((section("SFN")))
 enum tfm_platform_err_t
 tfm_platform_ioctl(tfm_platform_ioctl_req_t request,
                    psa_invec *input, psa_outvec *output)
@@ -90,7 +89,6 @@ tfm_platform_ioctl(tfm_platform_ioctl_req_t request,
 #endif /* TFM_PSA_API */
 }
 
-__attribute__((section("SFN")))
 enum tfm_platform_err_t
 tfm_platform_nv_counter_increment(uint32_t counter_id)
 {
@@ -127,7 +125,6 @@ tfm_platform_nv_counter_increment(uint32_t counter_id)
 #endif /* TFM_PSA_API */
 }
 
-__attribute__((section("SFN")))
 enum tfm_platform_err_t
 tfm_platform_nv_counter_read(uint32_t counter_id,
                              uint32_t size, uint8_t *val)

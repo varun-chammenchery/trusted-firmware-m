@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2020, Arm Limited. All rights reserved.
+ * Copyright (c) 2018-2021, Arm Limited. All rights reserved.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  *
@@ -7,14 +7,13 @@
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdlib.h>
-#include "tfm_thread.h"
-#include "tfm_wait.h"
+#include "thread.h"
 #include "psa/client.h"
 #include "psa/service.h"
-#include "tfm_internal_defines.h"
+#include "internal_errors.h"
 #include "cmsis_compiler.h"
 #include "utilities.h"
-#include "tfm_list.h"
+#include "lists.h"
 #include "tfm_pools.h"
 #include "tfm_memory_utils.h"
 #include "tfm_core_utils.h"
@@ -26,25 +25,24 @@ int32_t tfm_pool_init(struct tfm_pool_instance_t *pool, size_t poolsz,
     size_t i;
 
     if (!pool || num == 0) {
-        return IPC_ERROR_BAD_PARAMETERS;
+        return SPM_ERROR_BAD_PARAMETERS;
     }
 
     /* Ensure buffer is large enough */
     if (poolsz != ((chunksz + sizeof(struct tfm_pool_chunk_t)) * num +
         sizeof(struct tfm_pool_instance_t))) {
-        return IPC_ERROR_BAD_PARAMETERS;
+        return SPM_ERROR_BAD_PARAMETERS;
     }
 
     /* Buffer should be BSS cleared but clear it again */
     spm_memset(pool, 0, poolsz);
 
     /* Chain pool chunks */
-    tfm_list_init(&pool->chunks_list);
+    UNI_LISI_INIT_NODE(pool, next);
 
     pchunk = (struct tfm_pool_chunk_t *)pool->chunks;
     for (i = 0; i < num; i++) {
-        pchunk->pool = pool;
-        tfm_list_add_tail(&pool->chunks_list, &pchunk->list);
+        UNI_LIST_INSERT_AFTER(pool, pchunk, next);
         pchunk = (struct tfm_pool_chunk_t *)&pchunk->data[chunksz];
     }
 
@@ -52,39 +50,34 @@ int32_t tfm_pool_init(struct tfm_pool_instance_t *pool, size_t poolsz,
     pool->chunksz = chunksz;
     pool->chunk_count = num;
 
-    return IPC_SUCCESS;
+    return SPM_SUCCESS;
 }
 
 void *tfm_pool_alloc(struct tfm_pool_instance_t *pool)
 {
-    struct tfm_list_node_t *node;
-    struct tfm_pool_chunk_t *pchunk;
+    struct tfm_pool_chunk_t *node;
 
     if (!pool) {
         return NULL;
     }
 
-    if (tfm_list_is_empty(&pool->chunks_list)) {
+    if (UNI_LIST_IS_EMPTY(pool, next)) {
         return NULL;
     }
 
-    node = tfm_list_first_node(&pool->chunks_list);
-    pchunk = TFM_GET_CONTAINER_PTR(node, struct tfm_pool_chunk_t, list);
+    node = UNI_LIST_NEXT_NODE(pool, next);
+    UNI_LIST_REMOVE_NODE(pool, node, next);
 
-    /* Remove node from list node, it will be added when pool free */
-    tfm_list_del_node(node);
-
-    return &pchunk->data;
+    return &(((struct tfm_pool_chunk_t *)node)->data);
 }
 
-void tfm_pool_free(void *ptr)
+void tfm_pool_free(struct tfm_pool_instance_t *pool, void *ptr)
 {
     struct tfm_pool_chunk_t *pchunk;
-    struct tfm_pool_instance_t *pool;
 
-    pchunk = TFM_GET_CONTAINER_PTR(ptr, struct tfm_pool_chunk_t, data);
-    pool = (struct tfm_pool_instance_t *)pchunk->pool;
-    tfm_list_add_tail(&pool->chunks_list, &pchunk->list);
+    pchunk = TO_CONTAINER(ptr, struct tfm_pool_chunk_t, data);
+
+    UNI_LIST_INSERT_AFTER(pool, pchunk, next);
 }
 
 bool is_valid_chunk_data_in_pool(struct tfm_pool_instance_t *pool,
@@ -102,7 +95,7 @@ bool is_valid_chunk_data_in_pool(struct tfm_pool_instance_t *pool,
     }
 
     pool_chunk_address =
-    (uint32_t)TFM_GET_CONTAINER_PTR(data, struct tfm_pool_chunk_t, data);
+        (uint32_t)TO_CONTAINER(data, struct tfm_pool_chunk_t, data);
 
     /* Make sure that the chunk containing the message is aligned on */
     /* chunk boundary in the pool. */

@@ -50,12 +50,16 @@ struct memory_region_limits {
     uint32_t secondary_partition_base;
     uint32_t secondary_partition_limit;
 #endif /* BL2 */
+#ifdef NRF_NS_STORAGE
+    uint32_t non_secure_storage_partition_base;
+    uint32_t non_secure_storage_partition_limit;
+#endif /* NRF_NS_STORAGE */
 };
 
 /**
  * \brief Holds the data necessary to do isolation for a specific peripheral.
  */
-struct tfm_spm_partition_platform_data_t
+struct platform_data_t
 {
     uint32_t periph_start;
     uint32_t periph_limit;

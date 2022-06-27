@@ -11,9 +11,39 @@ set(NRF_BOARD_SELECTED True)
 
 add_subdirectory(../common/nrf5340 nrf5340)
 
-target_include_directories(platform_s PUBLIC .)
-target_include_directories(platform_ns PUBLIC .)
+target_include_directories(platform_region_defs
+    INTERFACE
+        ../common/nrf5340/partition
+)
+
+target_sources(platform_s
+    PRIVATE
+        tfm_hal_platform.c
+        $<$<BOOL:${TFM_PARTITION_PLATFORM}>:${CMAKE_CURRENT_SOURCE_DIR}/services/src/tfm_platform_system.c>
+)
+
+target_include_directories(platform_s
+    PUBLIC
+        .
+        ../common/nrf5340/partition
+        services/include
+)
+
+target_include_directories(platform_ns
+    PUBLIC
+        .
+)
 
 if(BL2)
-    target_include_directories(platform_bl2 PRIVATE .)
+    target_include_directories(platform_bl2
+        PUBLIC
+            ../common/nrf5340/partition
+        PRIVATE
+            .
+    )
+endif()
+
+if (TFM_PARTITION_PLATFORM)
+install(FILES       services/include/tfm_ioctl_api.h
+        DESTINATION ${TFM_INSTALL_PATH}/interface/include)
 endif()

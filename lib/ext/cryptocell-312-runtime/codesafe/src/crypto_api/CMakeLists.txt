@@ -1,5 +1,5 @@
 #-------------------------------------------------------------------------------
-# Copyright (c) 2020, Arm Limited. All rights reserved.
+# Copyright (c) 2020-2021, Arm Limited. All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 #
@@ -8,9 +8,10 @@
 ########################## LIB #################################################
 
 target_include_directories(${CC312_LIB_TARGET}
-    PRIVATE
-        common
+    PUBLIC
         cc3x_sym/driver
+    INTERFACE
+        common
         cc3x_sym/api
         pki/poly
         pki/ec_wrst
@@ -110,7 +111,7 @@ target_sources(${CC312_LIB_TARGET}
 ########################## CDMPU ###############################################
 
 target_include_directories(${CC312_CDMPU_TARGET}
-    PRIVATE
+    INTERFACE
         common
         cc3x_sym/driver
         cc3x_sym/api
@@ -119,7 +120,7 @@ target_include_directories(${CC312_CDMPU_TARGET}
 )
 
 target_sources(${CC312_CDMPU_TARGET}
-    PRIVATE
+    INTERFACE
         cc3x_sym/api/mbedtls_ccm_internal.c
         cc3x_sym/driver/aesccm_driver.c
         cc3x_sym/driver/aes_driver.c

@@ -1,5 +1,5 @@
 #-------------------------------------------------------------------------------
-# Copyright (c) 2020, Arm Limited. All rights reserved.
+# Copyright (c) 2020-2022, Arm Limited. All rights reserved.
 # Copyright (c) 2020, Nordic Semiconductor ASA.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -10,13 +10,6 @@ cmake_policy(SET CMP0076 NEW)
 set(CMAKE_CURRENT_SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR})
 
 add_subdirectory(../core nrf_common)
-
-#========================= Platform region defs ===============================#
-
-target_include_directories(platform_region_defs
-    INTERFACE
-        partition
-)
 
 #========================= Platform common defs ===============================#
 
@@ -45,19 +38,19 @@ endif()
 target_include_directories(platform_s
     PUBLIC
         .
-        partition
 )
 
 target_sources(platform_s
     PRIVATE
         target_cfg.c
-        ../core/nrfx/mdk/system_nrf5340_application.c
-        $<$<BOOL:TFM_PARTITION_PLATFORM>:${CMAKE_CURRENT_SOURCE_DIR}/services/src/tfm_platform_system.c>
+        $<$<BOOL:${TFM_PSA_API}>:${CMAKE_CURRENT_SOURCE_DIR}/tfm_interrupts.c>
+        ${HAL_NORDIC_PATH}/nrfx/mdk/system_nrf5340_application.c
 )
 
 target_compile_definitions(platform_s
     PUBLIC
         NRF5340_XXAA_APPLICATION
+        NRF_SKIP_FICR_NS_COPY_TO_RAM
 )
 
 #========================= Platform Non-Secure ================================#
@@ -69,7 +62,7 @@ target_include_directories(platform_ns
 
 target_sources(platform_ns
     PRIVATE
-        ../core/nrfx/mdk/system_nrf5340_application.c
+        ${HAL_NORDIC_PATH}/nrfx/mdk/system_nrf5340_application.c
 )
 
 target_compile_definitions(platform_ns
@@ -83,19 +76,25 @@ target_compile_definitions(platform_ns
 
 if(BL2)
     target_include_directories(platform_bl2
-        PUBLIC
-            partition
         PRIVATE
             .
     )
 
     target_sources(platform_bl2
         PRIVATE
-            ../core/nrfx/mdk/system_nrf5340_application.c
+            ${HAL_NORDIC_PATH}/nrfx/mdk/system_nrf5340_application.c
     )
 
     target_compile_definitions(platform_bl2
         PUBLIC
             NRF5340_XXAA_APPLICATION
+            NRF_SKIP_FICR_NS_COPY_TO_RAM
     )
 endif()
+
+#========================= Platform region defs ===============================#
+
+target_compile_definitions(platform_region_defs
+    INTERFACE
+        $<$<BOOL:${NRF_NS_STORAGE}>:NRF_NS_STORAGE>
+)

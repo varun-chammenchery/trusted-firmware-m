@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2020 Arm Limited
+ * Copyright (c) 2018-2021 Arm Limited
  * Copyright (c) 2020 Nuvoton Technology Corp. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,8 +29,8 @@
 
 /* The section names come from the scatter file */
 REGION_DECLARE(Load$$LR$$, LR_NS_PARTITION, $$Base);
-REGION_DECLARE(Load$$LR$$, LR_VENEER, $$Base);
-REGION_DECLARE(Load$$LR$$, LR_VENEER, $$Limit);
+REGION_DECLARE(Image$$, ER_VENEER, $$Base);
+REGION_DECLARE(Image$$, VENEER_ALIGN, $$Limit);
 #ifdef BL2
 REGION_DECLARE(Load$$LR$$, LR_SECONDARY_PARTITION, $$Base);
 #endif /* BL2 */
@@ -48,10 +48,10 @@ const struct memory_region_limits memory_regions = {
         NS_PARTITION_SIZE - 1,
 
     .veneer_base =
-        (uint32_t)&REGION_NAME(Load$$LR$$, LR_VENEER, $$Base),
+        (uint32_t)&REGION_NAME(Image$$, ER_VENEER, $$Base),
 
     .veneer_limit =
-        (uint32_t)&REGION_NAME(Load$$LR$$, LR_VENEER, $$Limit),
+        (uint32_t)&REGION_NAME(Image$$, VENEER_ALIGN, $$Limit),
 
 #ifdef BL2
     .secondary_partition_base =
@@ -94,21 +94,21 @@ extern ARM_DRIVER_MPC Driver_SRAM1_MPC, Driver_SRAM2_MPC;
 #define All_SEL_STATUS (SPNIDEN_SEL_STATUS | SPIDEN_SEL_STATUS | \
                         NIDEN_SEL_STATUS | DBGEN_SEL_STATUS)
 
-struct tfm_spm_partition_platform_data_t tfm_peripheral_std_uart = {
+struct platform_data_t tfm_peripheral_std_uart = {
         UART0_BASE + NS_OFFSET,
         UART0_BASE + NS_OFFSET + 0xFFF,
         PPC_SP_DO_NOT_CONFIGURE,
         -1
 };
 
-struct tfm_spm_partition_platform_data_t tfm_peripheral_uart1 = {
+struct platform_data_t tfm_peripheral_uart1 = {
         UART1_BASE,
         UART1_BASE + 0xFFF,
         PPC_SP_DO_NOT_CONFIGURE,
         -1
 };
 
-struct tfm_spm_partition_platform_data_t tfm_peripheral_timer0 = {
+struct platform_data_t tfm_peripheral_timer0 = {
         TMR01_BASE,
         TMR01_BASE + 0xFFF,
         PPC_SP_DO_NOT_CONFIGURE,
@@ -193,8 +193,8 @@ const struct sau_cfg_t sau_cfg[] = {
         false,
     },
     {
-        (uint32_t)&REGION_NAME(Load$$LR$$, LR_VENEER, $$Base),
-        (uint32_t)&REGION_NAME(Load$$LR$$, LR_VENEER, $$Limit),
+        (uint32_t)&REGION_NAME(Image$$, ER_VENEER, $$Base),
+        (uint32_t)&REGION_NAME(Image$$, VENEER_ALIGN, $$Limit),
         true,
     },
     {

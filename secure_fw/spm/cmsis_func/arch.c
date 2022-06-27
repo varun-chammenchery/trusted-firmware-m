@@ -1,17 +1,17 @@
 /*
- * Copyright (c) 2018-2020, Arm Limited. All rights reserved.
+ * Copyright (c) 2018-2022, Arm Limited. All rights reserved.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  *
  */
 
 #include "arch.h"
+#include "compiler_ext_defs.h"
 #include "tfm_secure_api.h"
-#include "tfm/tfm_spm_services.h"
 
 #if defined(__ICCARM__)
-uint32_t tfm_core_svc_handler(uint32_t *svc_args, uint32_t lr, uint32_t *msp);
-#pragma required=tfm_core_svc_handler
+#include "cmsis_psa/tfm_svcalls.h"
+#pragma required = tfm_core_svc_handler
 #endif
 
 nsfptr_t ns_entry;
@@ -22,29 +22,6 @@ void jump_to_ns_code(void)
     ns_entry();
 
     tfm_core_panic();
-}
-
-__attribute__((naked))
-int32_t tfm_core_get_caller_client_id(int32_t *caller_client_id)
-{
-    __ASM volatile(
-        "SVC %0\n"
-        "BX LR\n"
-        : : "I" (TFM_SVC_GET_CALLER_CLIENT_ID));
-}
-
-__attribute__((naked))
-static int32_t tfm_spm_request(int32_t request_type)
-{
-    __ASM volatile(
-        "SVC    %0\n"
-        "BX     lr\n"
-        : : "I" (TFM_SVC_SPM_REQUEST));
-}
-
-int32_t tfm_spm_request_reset_vote(void)
-{
-    return tfm_spm_request((int32_t)TFM_SPM_REQUEST_RESET_VOTE);
 }
 
 __attribute__((naked))
@@ -61,6 +38,15 @@ void tfm_disable_irq(psa_signal_t irq_signal)
     __ASM("SVC %0\n"
           "BX LR\n"
           : : "I" (TFM_SVC_DISABLE_IRQ));
+}
+
+__attribute__((naked))
+void tfm_sfn_completion(enum tfm_status_e res, uint32_t exc_return, uintptr_t msp)
+{
+    __ASM volatile("MSR msp, r2\n"
+                   "SVC %0\n"
+                   "BX LR\n"
+                   : : "I" (TFM_SVC_SFN_COMPLETION) : );
 }
 
 __attribute__((naked))
@@ -91,6 +77,12 @@ psa_signal_t psa_wait(psa_signal_t signal_mask, uint32_t timeout)
 }
 
 __attribute__((naked))
+void tfm_arch_trigger_exc_return(uint32_t exc_return)
+{
+    __ASM volatile("BX R0");
+}
+
+__attribute__((naked))
 void psa_eoi(psa_signal_t irq_signal)
 {
     __ASM("SVC %0\n"
@@ -99,7 +91,7 @@ void psa_eoi(psa_signal_t irq_signal)
 }
 
 #if defined(__ARM_ARCH_8_1M_MAIN__) || defined(__ARM_ARCH_8M_MAIN__)
-__attribute__((section("SFN"), naked))
+__section("SFN") __naked
 int32_t tfm_core_sfn_request(const struct tfm_sfn_req_s *desc_ptr)
 {
     __ASM volatile(
@@ -121,7 +113,7 @@ int32_t tfm_core_sfn_request(const struct tfm_sfn_req_s *desc_ptr)
         );
 }
 
-__attribute__((section("SFN"), naked))
+__section("SFN") __naked
 void priv_irq_handler_main(uint32_t partition_id, uint32_t unpriv_handler,
                            uint32_t irq_signal, uint32_t irq_line)
 {
@@ -152,7 +144,7 @@ void priv_irq_handler_main(uint32_t partition_id, uint32_t unpriv_handler,
           );
 }
 #elif defined(__ARM_ARCH_8M_BASE__)
-__attribute__((section("SFN"), naked))
+__section("SFN") __naked
 int32_t tfm_core_sfn_request(const struct tfm_sfn_req_s *desc_ptr)
 {
     __ASM volatile(
@@ -190,7 +182,7 @@ int32_t tfm_core_sfn_request(const struct tfm_sfn_req_s *desc_ptr)
         );
 }
 
-__attribute__((section("SFN"), naked))
+__section("SFN") __naked
 void priv_irq_handler_main(uint32_t partition_id, uint32_t unpriv_handler,
                            uint32_t irq_signal, uint32_t irq_line)
 {
@@ -268,14 +260,14 @@ void tfm_arch_set_secure_exception_priorities(void)
 #error Function based model works on V8M series only.
 #endif
 
-void tfm_arch_configure_coprocessors(void)
+void tfm_arch_config_extensions(void)
 {
-#if defined (__FPU_PRESENT) && (__FPU_PRESENT == 1U)
+#if defined(__FPU_PRESENT) && (__FPU_PRESENT == 1U)
     /* Configure Secure access to the FPU only if the secure image is being
      * built with the FPU in use. This avoids introducing extra interrupt
      * latency when the FPU is not used by the SPE.
      */
-#if defined (__FPU_USED) && (__FPU_USED == 1U)
+#if defined(__FPU_USED) && (__FPU_USED == 1U)
     /* Enable Secure privileged and unprivilged access to the FP Extension */
     SCB->CPACR |= (3U << 10U*2U)     /* enable CP10 full access */
                   | (3U << 11U*2U);  /* enable CP11 full access */
@@ -298,36 +290,39 @@ void tfm_arch_configure_coprocessors(void)
      */
     SCB->NSACR |= SCB_NSACR_CP10_Msk | SCB_NSACR_CP11_Msk;
 #endif
+
+#if defined(__ARM_ARCH_8_1M_MAIN__)
+    SCB->CCR |= SCB_CCR_TRD_Msk;
+#endif
 #endif
 }
 
-#if defined(__ARM_ARCH_8M_BASE__) || defined(__ARM_ARCH_8_1M_MAIN__) || defined(__ARM_ARCH_8M_MAIN__)
+#if defined(__ARM_ARCH_8M_BASE__)   || \
+    defined(__ARM_ARCH_8_1M_MAIN__) || \
+    defined(__ARM_ARCH_8M_MAIN__)
 __attribute__((naked)) void SVC_Handler(void)
 {
     __ASM volatile(
 #if !defined(__ICCARM__)
     ".syntax unified                        \n"
 #endif
-    "MRS     r0, PSP                        \n"
-    "MRS     r2, MSP                        \n"
-    "MOVS    r1, #4                         \n"
-    "MOV     r3, lr                         \n"
-    "TST     r1, r3                         \n"
+    "MRS     r0, MSP                        \n"
+    "MOV     r2, lr                         \n"
+    "MOVS    r3, #8                         \n"
+    "TST     r2, r3                         \n"
     "BNE     from_thread                    \n"
     /*
      * This branch is taken when the code is being invoked from handler mode.
      * This happens when a de-privileged interrupt handler is to be run. Seal
      * the stack before de-privileging.
      */
-    "LDR     r0, =0xFEF5EDA5                \n"
-    "MOVS    r3, r0                         \n"
-    "PUSH    {r0, r3}                       \n"
-    /* Overwrite r0 with MSP */
-    "MOV     r0, r2                         \n"
+    "LDR     r1, =0xFEF5EDA5                \n"
+    "MOVS    r3, r1                         \n"
+    "PUSH    {r1, r3}                       \n"
     "from_thread:                           \n"
-    "MOV     r1, lr                         \n"
+    "MRS     r1, PSP                        \n"
     "BL      tfm_core_svc_handler           \n"
-    "MOVS    r1, #4                         \n"
+    "MOVS    r1, #8                         \n"
     "TST     r1, r0                         \n"
     "BNE     to_thread                      \n"
     /*
@@ -345,58 +340,11 @@ __attribute__((naked)) void SVC_Handler(void)
 __attribute__((naked)) void SVC_Handler(void)
 {
     __ASM volatile(
-    "MOVS    r0, #4                \n" /* Check store SP in thread mode to r0 */
-    "MOV     r1, lr                \n"
-    "TST     r0, r1                \n"
-    "BEQ     handler               \n"
-    "MRS     r0, PSP               \n" /* Coming from thread mode */
-    "B       sp_stored             \n"
-    "handler:                      \n"
-    "BX      lr                    \n" /* Coming from handler mode */
-    "sp_stored:                    \n"
-    "MOV     r1, lr                \n"
-    "BL      tfm_core_svc_handler  \n"
-    "BX      r0                    \n"
+    "MRS     r0, MSP                        \n"
+    "MRS     r1, PSP                        \n"
+    "MOV     r2, lr                         \n"
+    "BL      tfm_core_svc_handler           \n"
+    "BX      r0                             \n"
     );
 }
 #endif
-
-__attribute__((naked)) void HardFault_Handler(void)
-{
-    /* A HardFault may indicate corruption of secure state, so it is essential
-     * that Non-secure code does not regain control after one is raised.
-     * Returning from this exception could allow a pending NS exception to be
-     * taken, so the current solution is not to return.
-     */
-    __ASM volatile("b    .");
-}
-
-__attribute__((naked)) void MemManage_Handler(void)
-{
-    /* A MemManage fault may indicate corruption of secure state, so it is
-     * essential that Non-secure code does not regain control after one is
-     * raised. Returning from this exception could allow a pending NS exception
-     * to be taken, so the current solution is not to return.
-     */
-    __ASM volatile("b    .");
-}
-
-__attribute__((naked)) void BusFault_Handler(void)
-{
-    /* A BusFault may indicate corruption of secure state, so it is essential
-     * that Non-secure code does not regain control after one is raised.
-     * Returning from this exception could allow a pending NS exception to be
-     * taken, so the current solution is not to return.
-     */
-    __ASM volatile("b    .");
-}
-
-__attribute__((naked)) void SecureFault_Handler(void)
-{
-    /* A SecureFault may indicate corruption of secure state, so it is essential
-     * that Non-secure code does not regain control after one is raised.
-     * Returning from this exception could allow a pending NS exception to be
-     * taken, so the current solution is not to return.
-     */
-    __ASM volatile("b    .");
-}

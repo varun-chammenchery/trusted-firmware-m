@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, Arm Limited. All rights reserved.
+ * Copyright (c) 2020-2021, Arm Limited. All rights reserved.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  *
@@ -9,9 +9,11 @@
 #define __SPM_FUNC_H__
 
 #include <stdint.h>
+#include "fih.h"
 #include "spm_partition_defs.h"
 #include "tfm_arch.h"
 #include "psa/client.h"
+#include "tfm_api.h"
 
 #define SPM_PARTITION_STATE_UNINIT       0
 #define SPM_PARTITION_STATE_IDLE         1
@@ -43,11 +45,12 @@
 
 enum spm_err_t {
     SPM_ERR_OK = 0,
-    SPM_ERR_PARTITION_DB_NOT_INIT,
-    SPM_ERR_PARTITION_ALREADY_ACTIVE,
-    SPM_ERR_PARTITION_NOT_AVAILABLE,
-    SPM_ERR_INVALID_PARAMETER,
-    SPM_ERR_INVALID_CONFIG,
+    SPM_ERR_PARTITION_DB_NOT_INIT = 0x3A5C,
+    SPM_ERR_PARTITION_ALREADY_ACTIVE = 0x5C3A,
+    SPM_ERR_PARTITION_NOT_AVAILABLE = 0xA35C,
+    SPM_ERR_INVALID_PARAMETER = 0xCA35,
+    SPM_ERR_INVALID_CONFIG = 0x35A3C,
+    SPM_ERR_GENERIC_ERR = 0x5C3A5,
 };
 
 /**
@@ -119,7 +122,7 @@ struct spm_partition_desc_t {
     struct spm_partition_runtime_data_t runtime_data;
     const struct spm_partition_static_data_t *static_data;
     /** A list of platform_data pointers */
-    const struct tfm_spm_partition_platform_data_t **platform_data_list;
+    const struct platform_data_t **platform_data_list;
 };
 
 struct spm_partition_db_t {
@@ -234,34 +237,14 @@ void tfm_spm_partition_set_caller_partition_idx(uint32_t partition_idx,
 void tfm_spm_partition_set_caller_client_id(uint32_t partition_idx,
                                             int32_t caller_client_id);
 
-
-/**
- * \brief Set the iovec parameters for the partition
- *
- * \param[in] partition_idx  Partition index
- * \param[in] args           The arguments of the secure function
- *
- * args is expected to be of type int32_t[4] where:
- *   args[0] is in_vec
- *   args[1] is in_len
- *   args[2] is out_vec
- *   args[3] is out_len
- *
- * \return Error code \ref spm_err_t
- *
- * \note This function doesn't check if partition_idx is valid.
- * \note This function assumes that the iovecs that are passed in args are
- *       valid, and does no sanity check on them at all.
- */
-enum spm_err_t tfm_spm_partition_set_iovec(uint32_t partition_idx,
-                                           const int32_t *args);
-
 /**
  * \brief Execute partition init function
  *
- * \return Error code \ref spm_err_t
+ * \return Error code \ref spm_err_t.
+ *         When FIH_ENABLE_DOUBLE_VARS is enabled, the return code will be
+ *         wrapped and protected in \ref fih_int structure.
  */
-enum spm_err_t tfm_spm_partition_init(void);
+fih_int tfm_spm_partition_init(void);
 
 /**
  * \brief Clears the context info from the database for a partition.
@@ -289,16 +272,17 @@ void tfm_spm_partition_set_signal_mask(uint32_t partition_idx,
 void tfm_spm_secure_api_init_done(void);
 
 /**
- * \brief Called if veneer is running in thread mode
+ * \brief Called for requests or returns from partition
  */
-uint32_t tfm_spm_partition_request_svc_handler(
-        const uint32_t *svc_args, uint32_t lr);
+void tfm_spm_partition_request_return_handler(
+        const uint32_t *svc_args, uint32_t exc_return, uint32_t *msp);
 
 /**
- * \brief Called when secure service returns
+ * \brief Called when SPM has completed a partition request or return
  */
-uint32_t tfm_spm_partition_return_handler(uint32_t lr);
-
+void tfm_spm_partition_completion_handler(enum tfm_status_e res,
+                                          uint32_t exc_return,
+                                          uint32_t *msp);
 /**
  * \brief Stores caller's client id in state context
  */
@@ -321,9 +305,9 @@ void tfm_spm_memory_permission_check_handler(uint32_t *svc_args);
  * \param[in] len               The length of the buffer
  * \param[in] alignment         The expected alignment (in bits)
  *
- * \return 1 if the check passes, 0 otherwise.
+ * \return TFM_SUCCESS on successful return, an error code otherwise
  *
- * \note For a 0 long buffer the check fails.
+ * \note For a zero length buffer the check fails.
  */
 int32_t tfm_spm_check_buffer_access(uint32_t  partition_idx,
                                     void     *start_addr,
@@ -390,15 +374,19 @@ enum spm_err_t tfm_spm_db_init(void);
 uint32_t tfm_spm_partition_get_privileged_mode(uint32_t partition_flags);
 
 /**
- * \brief                   Handle an SPM request by a secure service
- * \param[in] svc_ctx       The stacked SVC context
- */
-void tfm_spm_request_handler(const struct tfm_state_context_t *svc_ctx);
-
-/**
  * \brief                   Function to seal the PSP stacks for Function mode.
  */
 void tfm_spm_seal_psp_stacks(void);
 
+/**
+ * \brief Get the flags associated with a partition
+ *
+ * \param[in] partition_idx     Partition index
+ *
+ * \return Flags associated with the partition
+ *
+ * \note This function doesn't check if partition_idx is valid.
+ */
+uint32_t tfm_spm_partition_get_flags(uint32_t partition_idx);
 
 #endif /* __SPM_FUNC_H__ */

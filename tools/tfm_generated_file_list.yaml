@@ -1,5 +1,5 @@
 #-------------------------------------------------------------------------------
-# Copyright (c) 2018-2020, Arm Limited. All rights reserved.
+# Copyright (c) 2018-2022, Arm Limited. All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 #
@@ -22,36 +22,6 @@
         "output": "secure_fw/spm/cmsis_func/tfm_spm_db_func.inc"
     },
     {
-        "name": "Secure Partition declarations for IPC",
-        "short_name": "tfm_partition_list_ipc",
-        "template": "secure_fw/spm/cmsis_psa/tfm_spm_db_ipc.inc.template",
-        "output": "secure_fw/spm/cmsis_psa/tfm_spm_db_ipc.inc"
-    },
-    {
-        "name": "Secure Service list",
-        "short_name": "tfm_service_list",
-        "template": "secure_fw/partitions/tfm_service_list.inc.template",
-        "output": "secure_fw/partitions/tfm_service_list.inc"
-    },
-    {
-        "name": "Common secure ld file",
-        "short_name": "tfm_common_s.ld",
-        "template": "platform/ext/common/gcc/tfm_common_s.ld.template",
-        "output": "platform/ext/common/gcc/tfm_common_s.ld"
-    },
-    {
-        "name": "Common secure sct file",
-        "short_name": "tfm_common_s.sct",
-        "template": "platform/ext/common/armclang/tfm_common_s.sct.template",
-        "output": "platform/ext/common/armclang/tfm_common_s.sct"
-    },
-    {
-        "name": "Common secure icf file",
-        "short_name": "tfm_common_s.icf",
-        "template": "platform/ext/common/iar/tfm_common_s.icf.template",
-        "output": "platform/ext/common/iar/tfm_common_s.icf"
-    },
-    {
         "name": "Secure Veneers C file",
         "short_name": "tfm_veneers_c",
         "template": "secure_fw/spm/cmsis_func/tfm_veneers.c.template",
@@ -70,12 +40,6 @@
         "output": "secure_fw/spm/cmsis_func/tfm_secure_irq_handlers.inc"
     },
     {
-        "name": "Secure IRQ handlers for PSA API",
-        "short_name": "tfm_secure_irq_handlers_ipc",
-        "template": "secure_fw/spm/cmsis_psa/tfm_secure_irq_handlers_ipc.inc.template",
-        "output": "secure_fw/spm/cmsis_psa/tfm_secure_irq_handlers_ipc.inc"
-    },
-    {
         "name": "SID H file",
         "short_name": "sid.h",
         "template": "interface/include/psa_manifest/sid.h.template",
@@ -86,6 +50,18 @@
         "short_name": "pid.h",
         "template": "interface/include/psa_manifest/pid.h.template",
         "output": "interface/include/psa_manifest/pid.h"
+    },
+    {
+        "name": "SPM config header",
+        "short_name": "config_impl.h",
+        "template": "interface/include/config_impl.h.template",
+        "output": "interface/include/config_impl.h"
+    },
+    {
+        "name": "CMake variables generated",
+        "short_name": "config_impl.cmake",
+        "template": "tools/config_impl.cmake.template",
+        "output": "tools/config_impl.cmake"
     }
   ]
 }
